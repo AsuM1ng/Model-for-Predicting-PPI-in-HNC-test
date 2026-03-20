@@ -1,220 +1,357 @@
-# 本代码用于处理原始数据，以--原始数据节选--为例
-# 实现以下功能：
-# 1. 将中文标题转换为英文，保留最核心的信息（如性别（1=男，2=女）转换为Sex）
-# 2. 删除入院日期、出院日期列，计算转换为住院时长
-# 3. 删掉身高、体重、手术日期
-# 4. 缺失值处理：连续变量用中位数填充，分类变量用众数填充
-# 5. 连续变量标准化（Z-score）
-# 6. 分类变量编码：二分类变量用0/1编码，多分类变量用序列编码.对于分类种类较多的变量，应为新分类的出现作好编码准备
-# 7. BMI按照18.5、24的阈值分三类，作为多分类变量处理
-# 8. 能够读取.xlsx文件
-# 9. 详细的代码注释，标注每一部分功能
+"""清洗头颈肿瘤围手术期原始数据。
+
+功能概述：
+1. 读取 `.xlsx` 原始数据。
+2. 将中文字段名统一为简洁英文名。
+3. 由入院日期、出院日期计算住院时长，并删除原日期列。
+4. 删除不需要直接建模的字段（如身高、体重、手术日期）。
+5. 连续变量缺失值以中位数填充，并进行 Z-score 标准化。
+6. 分类变量缺失值以众数填充；二分类编码为 0/1，多分类编码为顺序整数。
+7. BMI 按照 <18.5、18.5-23.9、>=24 分为三类后再编码。
+8. 为类别很多、未来可能出现新类别的字段保存编码映射，便于复用。
+
+说明：
+- 本脚本优先依据“原始数据节选”的列名工作。
+- 在完整数据中，即使分类变量出现更多新类别，脚本也会自动纳入编码映射。
+- 输出两个文件：
+  1) `data1.csv`：清洗后的数据；
+  2) `category_mappings.json`：多分类/二分类字段编码字典。
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import re
+from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
-read_path = "原始数据节选.xlsx"
-data = pd.read_csv(read_path, encoding="utf-8-sig", header=0, low_memory=False)
 
-def get_unique_values(column):
-    """返回列中唯一值的列表"""
-    return list(column.unique())
+READ_PATH = Path("原始数据节选.xlsx")
+WRITE_PATH = Path("data1.csv")
+MAPPING_PATH = Path("category_mappings.json")
 
-# A 住院次数处理
 
-# B 性别转换
-# data['性别'].replace({'男': 1, '女': 2}, inplace=True)
+# ---------------------------------------------------------------------------
+# 1. 中文字段名 -> 英文字段名
+# ---------------------------------------------------------------------------
+# 仅保留核心业务含义；如果源数据中存在这些列，则会自动重命名。
+COLUMN_RENAME_MAP = {
+    "住院次数": "HospitalizationCount",
+    "性别\n（1=男，2=女）": "Sex",
+    "年龄": "Age",
+    "入院日期": "AdmissionDate",
+    "出院日期": "DischargeDate",
+    "出院科室": "DischargeDepartment",
+    "主要诊断": "PrimaryDiagnosis",
+    "主要手术名称": "PrimarySurgeryName",
+    "主要手术愈合等级": "PrimaryWoundHealingGrade",
+    "身高": "Height",
+    "体重": "Weight",
+    "BMI": "BMI",
+    "既往头颈部疾病手术外伤史（0=无，1=有）": "PriorHeadNeckHistory",
+    "冠心病（0=无，1=有）": "CoronaryHeartDisease",
+    "高血压（0=无，1=有）": "Hypertension",
+    "外周血管病（0=无，1=有）": "PeripheralVascularDisease",
+    "免疫性疾病（0=无，1=有）": "ImmuneDisease",
+    "糖尿病（0=无，1=有）": "Diabetes",
+    "高脂血症（0=无，1=有）": "Hyperlipidemia",
+    "激素类（0=无，1=有）": "SteroidUse",
+    "吸烟史（0=无，1=有）": "SmokingHistory",
+    "饮酒史（0=无，1=有）": "AlcoholHistory",
+    "术前前白蛋白PALB（0=未测）": "PreopPALB",
+    "术前白蛋白ALB（0=未测）": "PreopALB",
+    "术前血红蛋白HGB（0=未测）": "PreopHGB",
+    "术前口咽拭子（未生长=0，阳性=1，未测=2）": "PreopOropharyngealSwab",
+    "病变部位（喉=1、鼻=2、扁桃体=3、腮腺=4、咽部=5、唇=6、甲状腺=7、食管=8、舌=9、耳=10 、颌、面部=11、口底=12、气管=13、口腔、牙龈=14、梨状窝=15、上颌窦=16、皮肤肿物=17、腭=18、胸部=19、颈部=20）": "LesionSite",
+    "ASA评分": "ASA",
+    "术前抗菌药物：未用=0、头孢曲松钠=1、头孢呋辛钠=2、左奥硝唑氯化钠=3、吗啉硝唑氯化钠=4、甲磺酸左氧氟沙星氯化钠=5、克林霉素磷酸酯=6、盐酸莫西沙星=7、头孢噻肟钠=8、甲硝唑氯化钠=9、头孢米诺钠=10、奥硝唑=11、美洛西林钠舒巴坦钠=12、注射用哌拉西林钠舒巴坦钠=13、头孢哌酮钠舒巴坦钠=14、阿奇霉素=15、美罗培南=16、万古霉素=17": "PreopAntibiotic",
+    "手术时长（min）（不详=0，其他具体写出）": "OperationDurationMin",
+    "术中输血（有=1，无=0）": "IntraopTransfusion",
+    "吻合方式（如有吻合口：手工=1，器械=2，不详=0）": "AnastomosisType",
+    "颈清扫（0=无，1=有）": "NeckDissection",
+    "术前放疗（0=无，1=有）": "PreopRadiotherapy",
+    "术前化疗（0=无，1=有）": "PreopChemotherapy",
+    "术前同步放化疗（0=无，1:<=60Gy,2:>60Gy，有，但具体剂量不详=3）": "PreopConcurrentCRT",
+    "手术日期": "OperationDate",
+    "腔镜（0=无，1=有）": "Endoscopy",
+    "手术名称": "SurgeryName",
+    "皮瓣（无=0、颏下皮瓣=1、股前外侧皮瓣=2、鼻唇沟=3、颈阔肌=4、锁骨=5、其他=6、前臂桡侧皮瓣=7、游离空肠瓣=8、游离腓骨瓣=9、胸大肌皮瓣=10、局部转移皮瓣=11）  待整理": "FlapType",
+    "气管造瘘（无=0，有=1）": "Tracheostomy",
+    "术后病理无=0、warthin瘤=1、鳞癌=2、乳头状癌=3、多形性腺瘤=4、基底细胞癌=5、腺癌=6、黑色素瘤=7、未见癌=8、肉瘤=9、良性=10、甲状腺髓样癌=11、粘液表皮样癌=12、分化差的癌=13、腺样囊性癌=14、淋巴细胞瘤=15、梭形细胞瘤=16、囊肿=17": "PostopPathology",
+    "分化（无=0、低=1、中=2、高=3、未确定=4）": "Differentiation",
+    "最新版pTNM（5=5期，1=I期，2=II期，3=III期，4=IV期，5=无）": "pTNMStage",
+    "多原发（0=否、1=是）": "MultiplePrimary",
+    "术后0-3天白蛋白ALB（选最低的）    （0=未测）": "PostopDay0to3ALB",
+    "术后0-3天前白蛋白PALB（0=未测）": "PostopDay0to3PALB",
+    "非计划二次手术(0=否，1=是)": "UnplannedReoperation",
+    "肺部感染（0=无、1=有）": "PulmonaryInfection",
+    "吻合口瘘（0=无、1=有）": "AnastomoticFistula",
+    "吻合口瘘确认距术后天数（0=未发生，具体已写出）": "DaysToFistulaConfirmation",
+    "脂肪液化（0=无，1=有）": "FatLiquefaction",
+    "切口感染(0=无、1=有）": "IncisionInfection",
+    "感染病原体": "Pathogen",
+    "是否多重耐药（0=否，1＝是）": "MultiDrugResistance",
+}
 
-# 愈合等级转换，有缺失值
-# data['主要手术愈合等级'].replace({'II/甲': 1, 'II/乙': 2, 'II/丙': 3, 'II/其他': 4, 'III/甲': 5, 'III/乙': 6, 'III/其他': 7}, inplace=True)
 
-# 年龄归一化
-def agechange(val):
+# ---------------------------------------------------------------------------
+# 2. 工具函数
+# ---------------------------------------------------------------------------
+def normalize_missing(value: Any) -> Any:
+    """统一识别空值表达。"""
+    if pd.isna(value):
+        return pd.NA
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned == "" or cleaned.lower() in {"nan", "none", "null", "na", "n/a", "不详", "未知"}:
+            return pd.NA
+        return cleaned
+    return value
+
+
+FULLWIDTH_TRANSLATION = str.maketrans({
+    "（": "(",
+    "）": ")",
+    "：": ":",
+    "，": ",",
+    "、": ",",
+    "＝": "=",
+    "－": "-",
+    "≤": "<=",
+    "≥": ">=",
+    "　": " ",
+})
+
+
+def normalize_category_value(value: Any) -> Any:
+    """标准化分类值，减少同义写法对编码的影响。"""
+    value = normalize_missing(value)
+    if pd.isna(value):
+        return pd.NA
+
+    if isinstance(value, str):
+        text = value.translate(FULLWIDTH_TRANSLATION)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+    return value
+
+
+ROMAN_TO_INT = {"Ⅰ": 1, "Ⅱ": 2, "Ⅲ": 3, "Ⅳ": 4, "Ⅴ": 5}
+
+
+def convert_numeric_like(value: Any) -> Any:
+    """尽量把字符串中的数值转成数字；无法转换则保留原值。"""
+    value = normalize_missing(value)
+    if pd.isna(value):
+        return pd.NA
+
+    if isinstance(value, str):
+        text = normalize_category_value(value)
+        if text in ROMAN_TO_INT:
+            return ROMAN_TO_INT[text]
+
+        matched = re.fullmatch(r"[-+]?\d+(?:\.\d+)?", text)
+        if matched:
+            number = float(text)
+            return int(number) if number.is_integer() else number
+        return text
+    return value
+
+
+def safe_to_datetime(series: pd.Series) -> pd.Series:
+    """把日期列转为 pandas datetime；无法识别的值转为 NaT。"""
+    return pd.to_datetime(series.apply(normalize_missing), errors="coerce")
+
+
+# ---------------------------------------------------------------------------
+# 3. 日期、数值、BMI 等字段处理
+# ---------------------------------------------------------------------------
+def add_length_of_stay(df: pd.DataFrame) -> pd.DataFrame:
+    """计算住院时长（天），并删除入院/出院日期列。"""
+    if {"AdmissionDate", "DischargeDate"}.issubset(df.columns):
+        admission = safe_to_datetime(df["AdmissionDate"])
+        discharge = safe_to_datetime(df["DischargeDate"])
+        length_of_stay = (discharge - admission).dt.days
+        # 若数据中存在当天入/出院，希望保留为 0；若出院早于入院，则置为空待后续填补。
+        length_of_stay = length_of_stay.where(length_of_stay >= 0, pd.NA)
+        df["LengthOfStay"] = length_of_stay
+        df = df.drop(columns=["AdmissionDate", "DischargeDate"])
+    return df
+
+
+def categorize_bmi(value: Any) -> Any:
+    """BMI 分三类：<18.5、18.5-23.9、>=24。"""
+    value = convert_numeric_like(value)
+    if pd.isna(value):
+        return pd.NA
     try:
-        val = float(val)
+        bmi = float(value)
+    except (TypeError, ValueError):
+        return pd.NA
 
-        # 手动输入
-        min_val = 14
-        max_val = 89
-
-        if val < min_val:
-            val = min_val
-        elif val > max_val:
-            val = max_val
-
-        # 归一化公式: (x - min) / (max - min)
-        normalized = (val - min_val) / (max_val - min_val)
-        return normalized
-
-    except (ValueError, TypeError):
-        return None  # 处理非数值情况
-
-data['年龄'] = data['年龄'].apply(agechange)
-
-# bmi归一化
-def BMIchange(val):
-    try:
-        val = float(val)
-
-        # 手动输入
-        min_val = 11.9
-        max_val = 41.4
-
-        if val < min_val:
-            val = min_val
-        elif val > max_val:
-            val = max_val
-
-        # 归一化公式: (x - min) / (max - min)
-        normalized = (val - min_val) / (max_val - min_val)
-        return normalized
-
-    except (ValueError, TypeError):
-        return None  # 处理非数值情况
-
-data['BMI'] = data['BMI'].apply(BMIchange)
+    if bmi < 18.5:
+        return "Underweight"
+    if bmi < 24:
+        return "Normal"
+    return "OverweightOrObese"
 
 
-# 术前前白蛋白PALB归一化
-def classify_pre_palb(val):
-    try:
-        val = float(val)
+def preprocess_numeric_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """识别并整理连续变量。"""
+    numeric_candidates = [
+        "HospitalizationCount",
+        "Age",
+        "PreopPALB",
+        "PreopALB",
+        "PreopHGB",
+        "OperationDurationMin",
+        "PostopDay0to3ALB",
+        "PostopDay0to3PALB",
+        "DaysToFistulaConfirmation",
+        "LengthOfStay",
+    ]
 
-        # 手动输入
-        min_val = 8.2
-        max_val = 39.2
+    available_numeric_columns: list[str] = []
+    for column in numeric_candidates:
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column].apply(convert_numeric_like), errors="coerce")
+            available_numeric_columns.append(column)
 
-        if val < min_val:
-            val = min_val
-        elif val > max_val:
-            val = max_val
+    return df, available_numeric_columns
 
-        # 归一化公式: (x - min) / (max - min)
-        normalized = (val - min_val) / (max_val - min_val)
-        return normalized
 
-    except (ValueError, TypeError):
-        return None  # 处理非数值情况
+# ---------------------------------------------------------------------------
+# 4. 缺失值处理与标准化
+# ---------------------------------------------------------------------------
+def fill_numeric_missing_with_median(df: pd.DataFrame, numeric_columns: list[str]) -> pd.DataFrame:
+    """连续变量以中位数填补缺失值。"""
+    for column in numeric_columns:
+        median_value = df[column].median(skipna=True)
+        if not pd.isna(median_value):
+            df[column] = df[column].fillna(median_value)
+    return df
 
-data['术前前白蛋白PALB'] = data['术前前白蛋白PALB'].apply(classify_pre_palb)
 
-# 术前白蛋白ALB归一化
-def classify_pre_alb(val):
-    try:
-        val = float(val)
+def zscore_standardize(df: pd.DataFrame, numeric_columns: list[str]) -> pd.DataFrame:
+    """连续变量做 Z-score 标准化；若标准差为 0，则整列置为 0。"""
+    for column in numeric_columns:
+        mean_value = df[column].mean(skipna=True)
+        std_value = df[column].std(skipna=True, ddof=0)
+        if pd.isna(std_value) or math.isclose(std_value, 0.0):
+            df[column] = 0.0
+        else:
+            df[column] = (df[column] - mean_value) / std_value
+    return df
 
-        # 手动输入
-        min_val = 18
-        max_val = 53.3
 
-        if val < min_val:
-            val = min_val
-        elif val > max_val:
-            val = max_val
+# ---------------------------------------------------------------------------
+# 5. 分类变量编码
+# ---------------------------------------------------------------------------
+def encode_binary_series(series: pd.Series) -> tuple[pd.Series, dict[str, int]]:
+    """二分类变量编码为 0/1。"""
+    normalized = series.apply(normalize_category_value)
+    mode = normalized.mode(dropna=True)
+    fill_value = mode.iloc[0] if not mode.empty else "Missing"
+    normalized = normalized.fillna(fill_value)
 
-        # 归一化公式: (x - min) / (max - min)
-        normalized = (val - min_val) / (max_val - min_val)
-        return normalized
+    unique_values = list(pd.unique(normalized))
+    if len(unique_values) != 2:
+        raise ValueError("当前列不是二分类变量，不能使用 0/1 编码。")
 
-    except (ValueError, TypeError):
-        return None  # 处理非数值情况
+    # 排序保证编码结果稳定；同时尽量让 0/1 编码可复现。
+    sorted_values = sorted(unique_values, key=lambda item: str(item))
+    mapping = {str(value): index for index, value in enumerate(sorted_values)}
+    encoded = normalized.map(lambda item: mapping[str(item)]).astype("Int64")
+    return encoded, mapping
 
-data['术前白蛋白ALB'] = data['术前白蛋白ALB'].apply(classify_pre_alb)
 
-# 术前血红蛋白HGB归一化
-def classify_pre_hgb(val):
-    try:
-        val = float(val)
+def encode_multiclass_series(series: pd.Series) -> tuple[pd.Series, dict[str, int]]:
+    """多分类变量编码为顺序整数，并预留 0 作为未知类别编号。"""
+    normalized = series.apply(normalize_category_value)
+    mode = normalized.mode(dropna=True)
+    fill_value = mode.iloc[0] if not mode.empty else "Missing"
+    normalized = normalized.fillna(fill_value)
 
-        # 手动输入
-        min_val = 77
-        max_val = 183
+    unique_values = sorted({str(value) for value in pd.unique(normalized)})
+    mapping = {value: index + 1 for index, value in enumerate(unique_values)}
+    mapping["__UNKNOWN__"] = 0
+    encoded = normalized.map(lambda item: mapping.get(str(item), 0)).astype("Int64")
+    return encoded, mapping
 
-        if val < min_val:
-            val = min_val
-        elif val > max_val:
-            val = max_val
 
-        # 归一化公式: (x - min) / (max - min)
-        normalized = (val - min_val) / (max_val - min_val)
-        return normalized
+def encode_categorical_columns(df: pd.DataFrame, numeric_columns: list[str]) -> tuple[pd.DataFrame, dict[str, dict[str, int]]]:
+    """对所有非连续变量做编码，并输出编码字典。"""
+    categorical_columns = [column for column in df.columns if column not in numeric_columns]
+    category_mappings: dict[str, dict[str, int]] = {}
 
-    except (ValueError, TypeError):
-        return None  # 处理非数值情况
+    for column in categorical_columns:
+        # BMI 已在前面分箱，应视为多分类变量。
+        non_null_count = df[column].dropna().nunique()
+        if non_null_count <= 1:
+            # 单值列直接填成 0，避免后续建模报错。
+            df[column] = 0
+            category_mappings[column] = {"SingleValue": 0}
+            continue
 
-data['术前血红蛋白HGB'] = data['术前血红蛋白HGB'].apply(classify_pre_hgb)
+        if non_null_count == 2:
+            df[column], mapping = encode_binary_series(df[column])
+        else:
+            df[column], mapping = encode_multiclass_series(df[column])
+        category_mappings[column] = mapping
 
-# ASA评分
-data['ASA评分'].replace({'Ⅰ': 1, 'Ⅱ': 2, 'Ⅲ': 3, 'Ⅳ': 4}, inplace=True)
+    return df, category_mappings
 
-# 手术时长归一化
-def classify_surgery_duration(val):
-    try:
-        val = float(val)
 
-        # 手动输入
-        min_val = 19
-        max_val = 745
+# ---------------------------------------------------------------------------
+# 6. 主流程
+# ---------------------------------------------------------------------------
+def clean_data(read_path: Path = READ_PATH) -> tuple[pd.DataFrame, dict[str, dict[str, int]]]:
+    """执行完整清洗流程。"""
+    # 读取 xlsx；完整数据中如果工作表名称不同，默认读取第一个工作表。
+    df = pd.read_excel(read_path)
 
-        if val < min_val:
-            val = min_val
-        elif val > max_val:
-            val = max_val
+    # 统一原始空值表示。
+    df = df.applymap(normalize_missing)
 
-        # 归一化公式: (x - min) / (max - min)
-        normalized = (val - min_val) / (max_val - min_val)
-        return normalized
+    # 字段改名：只对当前存在的列执行映射，避免因完整数据列略有变化而报错。
+    rename_map = {column: COLUMN_RENAME_MAP[column] for column in df.columns if column in COLUMN_RENAME_MAP}
+    df = df.rename(columns=rename_map)
 
-    except (ValueError, TypeError):
-        return None  # 处理非数值情况
+    # 计算住院时长，并删除原日期列。
+    df = add_length_of_stay(df)
 
-data['手术时长（min）'] = data['手术时长（min）'].apply(classify_surgery_duration)
+    # 删除明确要求丢弃的字段。
+    drop_columns = [column for column in ["Height", "Weight", "OperationDate"] if column in df.columns]
+    if drop_columns:
+        df = df.drop(columns=drop_columns)
 
-# 术后0-3天白蛋白ALB
-def classify_aft_alb(val):
-    try:
-        val = float(val)
+    # BMI 分箱处理，作为多分类变量。
+    if "BMI" in df.columns:
+        df["BMI"] = df["BMI"].apply(categorize_bmi)
 
-        # 手动输入
-        min_val = 8
-        max_val = 57.9
+    # 数值列预处理。
+    df, numeric_columns = preprocess_numeric_columns(df)
 
-        if val < min_val:
-            val = min_val
-        elif val > max_val:
-            val = max_val
+    # 连续变量缺失值填补 + Z-score 标准化。
+    df = fill_numeric_missing_with_median(df, numeric_columns)
+    df = zscore_standardize(df, numeric_columns)
 
-        # 归一化公式: (x - min) / (max - min)
-        normalized = (val - min_val) / (max_val - min_val)
-        return normalized
+    # 分类变量众数填补 + 编码。
+    df, category_mappings = encode_categorical_columns(df, numeric_columns)
+    return df, category_mappings
 
-    except (ValueError, TypeError):
-        return None  # 处理非数值情况
 
-data['术后0-3天白蛋白ALB'] = data['术后0-3天白蛋白ALB'].apply(classify_aft_alb)
+def save_outputs(df: pd.DataFrame, category_mappings: dict[str, dict[str, int]]) -> None:
+    """保存清洗结果和编码字典。"""
+    df.to_csv(WRITE_PATH, index=False, encoding="utf-8-sig")
+    MAPPING_PATH.write_text(json.dumps(category_mappings, ensure_ascii=False, indent=2), encoding="utf-8")
 
-# 术后0-3天前白蛋白PALB
-def classify_aft_palb(val):
-    try:
-        val = float(val)
 
-        # 手动输入
-        min_val = 3
-        max_val = 59.8
-
-        if val < min_val:
-            val = min_val
-        elif val > max_val:
-            val = max_val
-
-        # 归一化公式: (x - min) / (max - min)
-        normalized = (val - min_val) / (max_val - min_val)
-        return normalized
-
-    except (ValueError, TypeError):
-        return None  # 处理非数值情况
-
-data['术后0-3天前白蛋白PALB'] = data['术后0-3天前白蛋白PALB'].apply(classify_aft_palb)
-
-# 保存处理后的数据
-write_path = "data1.csv"
-data.to_csv(write_path, index=False, encoding='utf-8-sig')
+if __name__ == "__main__":
+    cleaned_df, mappings = clean_data()
+    save_outputs(cleaned_df, mappings)
+    print(f"数据清洗完成，已输出：{WRITE_PATH}")
+    print(f"分类映射已保存：{MAPPING_PATH}")
