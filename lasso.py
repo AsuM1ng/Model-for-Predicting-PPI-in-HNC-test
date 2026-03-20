@@ -145,13 +145,26 @@ def save_outputs(full_data: pd.DataFrame, X_train: pd.DataFrame, X_test: pd.Data
 
 
 if __name__ == "__main__":
-    dataframe = load_dataset()
-    X, y = prepare_xy(dataframe)
-    tqdm.write("开始按7:3进行分层抽样...")
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=TEST_SIZE, stratify=y, random_state=RANDOM_STATE)
-    coefficient_df, _ = fit_lasso(X_train, y_train)
-    final_features, corr_matrix, removed_pairs = correlation_filter(X_train, coefficient_df)
-    save_outputs(dataframe, X_train, X_test, y_train, y_test, coefficient_df, final_features, corr_matrix, removed_pairs)
+    with tqdm(total=5, desc="lasso总进度") as progress:
+        dataframe = load_dataset()
+        progress.update(1)
+
+        X, y = prepare_xy(dataframe)
+        progress.update(1)
+
+        tqdm.write("开始按7:3进行分层抽样...")
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=TEST_SIZE, stratify=y, random_state=RANDOM_STATE
+        )
+        progress.update(1)
+
+        coefficient_df, _ = fit_lasso(X_train, y_train)
+        final_features, corr_matrix, removed_pairs = correlation_filter(X_train, coefficient_df)
+        progress.update(1)
+
+        save_outputs(dataframe, X_train, X_test, y_train, y_test, coefficient_df, final_features, corr_matrix, removed_pairs)
+        progress.update(1)
+
     print("=== LASSO筛选完成 ===")
     print(f"训练集: {len(y_train)}，测试集: {len(y_test)}")
     print(f"LASSO保留变量数: {(coefficient_df['coefficient'] != 0).sum()}")

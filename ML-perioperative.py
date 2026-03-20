@@ -108,6 +108,7 @@ def bootstrap_auc_ci(model, X_train: pd.DataFrame, y_train: pd.Series, X_test: p
 
 
 def explain_model(model_name: str, model, X_train: pd.DataFrame, X_test: pd.DataFrame) -> None:
+    tqdm.write(f"开始进行 {model_name} 的SHAP解释...")
     SHAP_DIR.mkdir(parents=True, exist_ok=True)
     sample_train = X_train.sample(min(80, len(X_train)), random_state=RANDOM_STATE)
     sample_test = X_test.sample(min(80, len(X_test)), random_state=RANDOM_STATE)
@@ -147,54 +148,63 @@ def explain_model(model_name: str, model, X_train: pd.DataFrame, X_test: pd.Data
 
 
 if __name__ == "__main__":
-    train_df, test_df, features = load_datasets()
-    X_train, y_train = prepare_xy(train_df, features)
-    X_test, y_test = prepare_xy(test_df, features)
-    models = build_models()
-    cv = RepeatedStratifiedKFold(n_splits=CV_SPLITS, n_repeats=CV_REPEATS, random_state=RANDOM_STATE)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    with tqdm(total=5, desc="ML-perioperative总进度") as progress:
+        train_df, test_df, features = load_datasets()
+        progress.update(1)
 
-    metrics_records: list[dict[str, float | str]] = []
-    bootstrap_records: list[dict[str, float | str]] = []
-    roc_payload: dict[str, dict[str, list[float]]] = {}
+        X_train, y_train = prepare_xy(train_df, features)
+        X_test, y_test = prepare_xy(test_df, features)
+        progress.update(1)
 
-    for model_name, model in tqdm(models.items(), desc="模型训练与评估"):
-        tqdm.write(f"开始处理模型：{model_name}")
-        cv_scores = cross_val_score(model, X_train, y_train, scoring="roc_auc", cv=cv, n_jobs=None)
-        fitted_model = clone(model)
-        fitted_model.fit(X_train, y_train)
-        y_prob = fitted_model.predict_proba(X_test)[:, 1]
-        metrics = evaluate_threshold_metrics(y_test, y_prob)
-        auc_lower, auc_median, auc_upper = bootstrap_auc_ci(fitted_model, X_train, y_train, X_test, y_test)
-        fpr, tpr, _ = roc_curve(y_test, y_prob)
-        roc_payload[model_name] = {"fpr": fpr.tolist(), "tpr": tpr.tolist()}
-        metrics_records.append({
-            "model": model_name,
-            "cv_auc_mean": float(np.mean(cv_scores)),
-            "cv_auc_std": float(np.std(cv_scores, ddof=1)),
-            **metrics,
-            "bootstrap_auc_ci_lower": auc_lower,
-            "bootstrap_auc_ci_median": auc_median,
-            "bootstrap_auc_ci_upper": auc_upper,
-            "n_features": len(features),
-        })
-        bootstrap_records.append({"model": model_name, "auc_ci_lower": auc_lower, "auc_ci_median": auc_median, "auc_ci_upper": auc_upper})
-        explain_model(model_name, fitted_model, X_train, X_test)
+        models = build_models()
+        cv = RepeatedStratifiedKFold(n_splits=CV_SPLITS, n_repeats=CV_REPEATS, random_state=RANDOM_STATE)
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        progress.update(1)
 
-    metrics_df = pd.DataFrame(metrics_records).sort_values("cv_auc_mean", ascending=False)
-    metrics_df.to_csv(METRICS_PATH, index=False, encoding="utf-8-sig")
-    pd.DataFrame(bootstrap_records).to_csv(BOOTSTRAP_PATH, index=False, encoding="utf-8-sig")
+        metrics_records: list[dict[str, float | str]] = []
+        bootstrap_records: list[dict[str, float | str]] = []
+        roc_payload: dict[str, dict[str, list[float]]] = {}
 
-    plt.figure(figsize=(8, 6))
-    for model_name, roc_data in roc_payload.items():
-        plt.plot(roc_data["fpr"], roc_data["tpr"], label=model_name)
-    plt.plot([0, 1], [0, 1], "k--", alpha=0.5)
-    plt.xlabel("1 - Specificity")
-    plt.ylabel("Sensitivity")
-    plt.title("ROC Curves on Test Set")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(ROC_PATH, dpi=300, bbox_inches="tight")
-    plt.close()
+        for model_name, model in tqdm(models.items(), desc="模型训练与评估"):
+            tqdm.write(f"开始处理模型：{model_name}")
+            cv_scores = cross_val_score(model, X_train, y_train, scoring="roc_auc", cv=cv, n_jobs=None)
+            fitted_model = clone(model)
+            fitted_model.fit(X_train, y_train)
+            y_prob = fitted_model.predict_proba(X_test)[:, 1]
+            metrics = evaluate_threshold_metrics(y_test, y_prob)
+            auc_lower, auc_median, auc_upper = bootstrap_auc_ci(fitted_model, X_train, y_train, X_test, y_test)
+            fpr, tpr, _ = roc_curve(y_test, y_prob)
+            roc_payload[model_name] = {"fpr": fpr.tolist(), "tpr": tpr.tolist()}
+            metrics_records.append({
+                "model": model_name,
+                "cv_auc_mean": float(np.mean(cv_scores)),
+                "cv_auc_std": float(np.std(cv_scores, ddof=1)),
+                **metrics,
+                "bootstrap_auc_ci_lower": auc_lower,
+                "bootstrap_auc_ci_median": auc_median,
+                "bootstrap_auc_ci_upper": auc_upper,
+                "n_features": len(features),
+            })
+            bootstrap_records.append({"model": model_name, "auc_ci_lower": auc_lower, "auc_ci_median": auc_median, "auc_ci_upper": auc_upper})
+            explain_model(model_name, fitted_model, X_train, X_test)
+        progress.update(1)
+
+        metrics_df = pd.DataFrame(metrics_records).sort_values("cv_auc_mean", ascending=False)
+        metrics_df.to_csv(METRICS_PATH, index=False, encoding="utf-8-sig")
+        pd.DataFrame(bootstrap_records).to_csv(BOOTSTRAP_PATH, index=False, encoding="utf-8-sig")
+
+        plt.figure(figsize=(8, 6))
+        for model_name, roc_data in roc_payload.items():
+            plt.plot(roc_data["fpr"], roc_data["tpr"], label=model_name)
+        plt.plot([0, 1], [0, 1], "k--", alpha=0.5)
+        plt.xlabel("1 - Specificity")
+        plt.ylabel("Sensitivity")
+        plt.title("ROC Curves on Test Set")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(ROC_PATH, dpi=300, bbox_inches="tight")
+        plt.close()
+        progress.update(1)
+
     print("=== 机器学习建模完成 ===")
     print(metrics_df.to_string(index=False))
