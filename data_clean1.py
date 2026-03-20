@@ -6,9 +6,11 @@ from __future__ import annotations
 1. 统一缺失值与“不明/不详/未知”等标签；
 2. 删除缺失较多（缺失值 + 不明标签占比过高）的变量；
 3. 删除研究中不直接参与建模的原始字段；
-4. 连续变量采用中位数填补并标准化；
-5. 分类变量采用众数填补并编码；
-6. 输出清洗后的整表，后续所有特征筛选均在训练集完成。
+4. 以肺部感染为因变量拆分阳性/阴性数据；
+5. 阳性数据对缺失值及“不明/未测”标签进行填补；
+6. 阴性数据若存在缺失则整行删除；
+7. 合并处理后的阳性和阴性数据，并完成编码输出；
+8. 输出阳性、阴性及最终清洗后的整表，后续所有特征筛选均在训练集完成。
 """
 
 import json
@@ -22,6 +24,8 @@ from tqdm.auto import tqdm
 
 READ_PATH = Path("原始数据.xlsx")
 WRITE_PATH = Path("data1.csv")
+POSITIVE_PATH = Path("data_positive.csv")
+NEGATIVE_PATH = Path("data_negative.csv")
 MAPPING_PATH = Path("category_mappings.json")
 REVIEW_PATH = Path("data_review_summary.txt")
 DROP_REPORT_PATH = Path("dropped_variables_report.json")
@@ -168,11 +172,10 @@ def compute_variable_quality(df: pd.DataFrame) -> pd.DataFrame:
         series = df[column]
         normalized = series.apply(normalize_category_value)
         missing_mask = normalized.isna()
-        unknown_like_ratio = float(missing_mask.mean())
         records.append({
             "column": column,
             "missing_or_unknown_count": int(missing_mask.sum()),
-            "missing_or_unknown_ratio": unknown_like_ratio,
+            "missing_or_unknown_ratio": float(missing_mask.mean()),
             "n_unique_non_null": int(normalized.dropna().nunique()),
             "total_rows": total_rows,
         })
@@ -219,16 +222,53 @@ def drop_high_missing_variables(df: pd.DataFrame, quality_df: pd.DataFrame) -> t
     return df.drop(columns=drop_columns, errors="ignore"), dropped_records
 
 
-def fill_numeric_missing_with_median(df: pd.DataFrame, numeric_columns: list[str]) -> pd.DataFrame:
-    for column in tqdm(numeric_columns, desc="连续变量缺失填补", leave=False):
-        median_value = df[column].median(skipna=True)
-        if not pd.isna(median_value):
-            df[column] = df[column].fillna(median_value)
-    return df
+def split_by_target(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    target = pd.to_numeric(df[TARGET_COLUMN].apply(convert_numeric_like), errors="coerce")
+    positive_df = df.loc[target == 1].copy()
+    negative_df = df.loc[target == 0].copy()
+    if positive_df.empty or negative_df.empty:
+        raise ValueError("按肺部感染拆分后，阳性或阴性数据为空，请检查原始数据。")
+    return positive_df, negative_df
+
+
+def handle_positive_missing(positive_df: pd.DataFrame, numeric_columns: list[str]) -> pd.DataFrame:
+    for column in tqdm(positive_df.columns, desc="阳性组缺失处理", leave=False):
+        if column == TARGET_COLUMN:
+            positive_df[column] = pd.to_numeric(positive_df[column].apply(convert_numeric_like), errors="coerce").fillna(1).astype(int)
+            continue
+        if column in numeric_columns:
+            positive_df[column] = pd.to_numeric(positive_df[column], errors="coerce")
+            median_value = positive_df[column].median(skipna=True)
+            if pd.isna(median_value):
+                median_value = 0
+            positive_df[column] = positive_df[column].fillna(median_value)
+        else:
+            normalized = positive_df[column].apply(normalize_category_value)
+            mode = normalized.mode(dropna=True)
+            fill_value = mode.iloc[0] if not mode.empty else "Missing"
+            positive_df[column] = normalized.fillna(fill_value)
+    return positive_df
+
+
+def drop_negative_missing_rows(negative_df: pd.DataFrame, numeric_columns: list[str]) -> tuple[pd.DataFrame, int]:
+    normalized_df = negative_df.copy()
+    for column in tqdm(normalized_df.columns, desc="阴性组缺失检查", leave=False):
+        if column == TARGET_COLUMN:
+            normalized_df[column] = pd.to_numeric(normalized_df[column].apply(convert_numeric_like), errors="coerce")
+        elif column in numeric_columns:
+            normalized_df[column] = pd.to_numeric(normalized_df[column], errors="coerce")
+        else:
+            normalized_df[column] = normalized_df[column].apply(normalize_category_value)
+    before_rows = len(normalized_df)
+    normalized_df = normalized_df.dropna(axis=0, how="any").copy()
+    normalized_df[TARGET_COLUMN] = normalized_df[TARGET_COLUMN].astype(int)
+    return normalized_df, before_rows - len(normalized_df)
 
 
 def zscore_standardize(df: pd.DataFrame, numeric_columns: list[str]) -> pd.DataFrame:
     for column in tqdm(numeric_columns, desc="连续变量标准化", leave=False):
+        if column not in df.columns:
+            continue
         mean_value = df[column].mean(skipna=True)
         std_value = df[column].std(skipna=True, ddof=0)
         if pd.isna(std_value) or math.isclose(std_value, 0.0):
@@ -261,6 +301,10 @@ def encode_categorical_columns(df: pd.DataFrame, numeric_columns: list[str]) -> 
     categorical_columns = [column for column in df.columns if column not in numeric_columns]
     category_mappings: dict[str, dict[str, int]] = {}
     for column in tqdm(categorical_columns, desc="分类变量编码", leave=False):
+        if column == TARGET_COLUMN:
+            df[column] = pd.to_numeric(df[column], errors="coerce").fillna(0).astype(int)
+            category_mappings[column] = {"0": 0, "1": 1}
+            continue
         n_unique = df[column].dropna().nunique()
         if n_unique <= 1:
             df[column] = 0
@@ -272,32 +316,64 @@ def encode_categorical_columns(df: pd.DataFrame, numeric_columns: list[str]) -> 
     return df, category_mappings
 
 
-def clean_data(read_path: Path = READ_PATH) -> tuple[pd.DataFrame, dict[str, dict[str, int]], list[dict[str, Any]], pd.DataFrame]:
-    tqdm.write("开始读取原始数据...")
-    df = pd.read_excel(read_path)
-    tqdm.write("开始统一字段与缺失值表达...")
-    df = df.apply(lambda col: col.map(normalize_missing))
-    rename_map = {column: COLUMN_RENAME_MAP[column] for column in df.columns if column in COLUMN_RENAME_MAP}
-    df = df.rename(columns=rename_map)
-    df = add_length_of_stay(df)
+def clean_data(read_path: Path = READ_PATH) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, dict[str, int]], list[dict[str, Any]], pd.DataFrame, dict[str, int]]:
+    with tqdm(total=9, desc="data_clean1总进度") as progress:
+        tqdm.write("开始读取原始数据...")
+        df = pd.read_excel(read_path)
+        progress.update(1)
 
-    quality_df = compute_variable_quality(df)
-    REVIEW_PATH.write_text(build_data_review_summary(df, quality_df), encoding="utf-8")
+        tqdm.write("开始统一字段与缺失值表达...")
+        df = df.apply(lambda col: col.map(normalize_missing))
+        rename_map = {column: COLUMN_RENAME_MAP[column] for column in df.columns if column in COLUMN_RENAME_MAP}
+        df = df.rename(columns=rename_map)
+        df = add_length_of_stay(df)
+        progress.update(1)
 
-    df, dropped_records = drop_high_missing_variables(df, quality_df)
-    df, numeric_columns = preprocess_numeric_columns(df)
-    df = fill_numeric_missing_with_median(df, numeric_columns)
-    df = zscore_standardize(df, numeric_columns)
-    df, category_mappings = encode_categorical_columns(df, numeric_columns)
-    return df, category_mappings, dropped_records, quality_df
+        quality_df = compute_variable_quality(df)
+        REVIEW_PATH.write_text(build_data_review_summary(df, quality_df), encoding="utf-8")
+        progress.update(1)
+
+        df, dropped_records = drop_high_missing_variables(df, quality_df)
+        progress.update(1)
+
+        df, numeric_columns = preprocess_numeric_columns(df)
+        progress.update(1)
+
+        positive_df, negative_df = split_by_target(df)
+        positive_df = handle_positive_missing(positive_df, numeric_columns)
+        negative_df, negative_rows_dropped = drop_negative_missing_rows(negative_df, numeric_columns)
+        progress.update(1)
+
+        combined_df = pd.concat([positive_df, negative_df], axis=0).sort_index().reset_index(drop=True)
+        progress.update(1)
+
+        combined_df = zscore_standardize(combined_df, numeric_columns)
+        combined_df, category_mappings = encode_categorical_columns(combined_df, numeric_columns)
+        positive_encoded = combined_df.loc[combined_df[TARGET_COLUMN] == 1].copy()
+        negative_encoded = combined_df.loc[combined_df[TARGET_COLUMN] == 0].copy()
+        progress.update(1)
+
+        report_summary = {
+            "positive_rows": int(len(positive_encoded)),
+            "negative_rows_before_drop": int(len(negative_df) + negative_rows_dropped),
+            "negative_rows_after_drop": int(len(negative_encoded)),
+            "negative_rows_dropped": int(negative_rows_dropped),
+            "final_rows": int(len(combined_df)),
+        }
+        progress.update(1)
+
+    return combined_df, positive_encoded, negative_encoded, category_mappings, dropped_records, quality_df, report_summary
 
 
-def save_outputs(df: pd.DataFrame, category_mappings: dict[str, dict[str, int]], dropped_records: list[dict[str, Any]], quality_df: pd.DataFrame) -> None:
+def save_outputs(df: pd.DataFrame, positive_df: pd.DataFrame, negative_df: pd.DataFrame, category_mappings: dict[str, dict[str, int]], dropped_records: list[dict[str, Any]], quality_df: pd.DataFrame, report_summary: dict[str, int]) -> None:
     df.to_csv(WRITE_PATH, index=False, encoding="utf-8-sig")
+    positive_df.to_csv(POSITIVE_PATH, index=False, encoding="utf-8-sig")
+    negative_df.to_csv(NEGATIVE_PATH, index=False, encoding="utf-8-sig")
     MAPPING_PATH.write_text(json.dumps(category_mappings, ensure_ascii=False, indent=2), encoding="utf-8")
     DROP_REPORT_PATH.write_text(
         json.dumps({
             "variable_missing_threshold": VARIABLE_MISSING_THRESHOLD,
+            "group_processing": report_summary,
             "dropped_variables": dropped_records,
             "variable_quality": quality_df.to_dict(orient="records"),
         }, ensure_ascii=False, indent=2),
@@ -306,9 +382,11 @@ def save_outputs(df: pd.DataFrame, category_mappings: dict[str, dict[str, int]],
 
 
 if __name__ == "__main__":
-    cleaned_df, mappings, dropped_variables, quality_table = clean_data()
-    save_outputs(cleaned_df, mappings, dropped_variables, quality_table)
+    cleaned_df, positive_cleaned_df, negative_cleaned_df, mappings, dropped_variables, quality_table, summary = clean_data()
+    save_outputs(cleaned_df, positive_cleaned_df, negative_cleaned_df, mappings, dropped_variables, quality_table, summary)
     print(f"数据清洗完成，已输出：{WRITE_PATH}")
+    print(f"阳性数据已保存：{POSITIVE_PATH}")
+    print(f"阴性数据已保存：{NEGATIVE_PATH}")
     print(f"分类映射已保存：{MAPPING_PATH}")
     print(f"变量删除报告已保存：{DROP_REPORT_PATH}")
     print(f"数据审阅摘要已保存：{REVIEW_PATH}")

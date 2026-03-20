@@ -59,16 +59,25 @@ def fit_multivariable_logistic(X: pd.DataFrame, y: pd.Series) -> pd.DataFrame:
 
 
 if __name__ == "__main__":
-    train_df, features = load_inputs()
-    X, y = prepare_design_matrix(train_df, features)
-    results_df = fit_multivariable_logistic(X, y)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    results_df.to_csv(LOGISTIC_RESULTS_PATH, index=False, encoding="utf-8-sig")
-    independent_predictors = results_df.loc[results_df["is_independent_predictor"], "feature"].tolist()
-    INDEPENDENT_FEATURES_PATH.write_text(json.dumps({
-        "target": TARGET_COLUMN,
-        "p_value_threshold": P_VALUE_THRESHOLD,
-        "independent_predictors": independent_predictors,
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    with tqdm(total=4, desc="mul_logistic总进度") as progress:
+        train_df, features = load_inputs()
+        progress.update(1)
+
+        X, y = prepare_design_matrix(train_df, features)
+        progress.update(1)
+
+        results_df = fit_multivariable_logistic(X, y)
+        progress.update(1)
+
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        results_df.to_csv(LOGISTIC_RESULTS_PATH, index=False, encoding="utf-8-sig")
+        independent_predictors = results_df.loc[results_df["is_independent_predictor"], "feature"].tolist()
+        INDEPENDENT_FEATURES_PATH.write_text(json.dumps({
+            "target": TARGET_COLUMN,
+            "p_value_threshold": P_VALUE_THRESHOLD,
+            "independent_predictors": independent_predictors,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        progress.update(1)
+
     print("=== 多因素Logistic回归完成 ===")
     print(results_df.to_string(index=False))
