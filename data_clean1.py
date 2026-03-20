@@ -9,7 +9,7 @@
 6. 以“肺部感染”为因变量：阳性样本缺失值保留并补齐，阴性样本中高缺失记录直接删除。
 7. 连续变量完成缺失值处理后进行 Z-score 标准化。
 8. 分类变量缺失值以众数填充；二分类编码为 0/1，多分类编码为顺序整数。
-9. BMI 按照 <18.5、18.5-23.9、>=24 分为三类后再编码。
+9. BMI 按连续变量处理，完成缺失值填补后进行 Z-score 标准化。
 10. 为类别很多、未来可能出现新类别的字段保存编码映射，便于复用。
 
 说明：
@@ -173,7 +173,7 @@ def safe_to_datetime(series: pd.Series) -> pd.Series:
 
 
 # ---------------------------------------------------------------------------
-# 3. 日期、数值、BMI 等字段处理
+# 3. 日期与数值字段处理
 # ---------------------------------------------------------------------------
 def add_length_of_stay(df: pd.DataFrame) -> pd.DataFrame:
     """计算住院时长（天），并删除入院/出院日期列。"""
@@ -188,28 +188,12 @@ def add_length_of_stay(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def categorize_bmi(value: Any) -> Any:
-    """BMI 分三类：<18.5、18.5-23.9、>=24。"""
-    value = convert_numeric_like(value)
-    if pd.isna(value):
-        return pd.NA
-    try:
-        bmi = float(value)
-    except (TypeError, ValueError):
-        return pd.NA
-
-    if bmi < 18.5:
-        return "Underweight"
-    if bmi < 24:
-        return "Normal"
-    return "OverweightOrObese"
-
-
 def preprocess_numeric_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     """识别并整理连续变量。"""
     numeric_candidates = [
         "HospitalizationCount",
         "Age",
+        "BMI",
         "PreopPALB",
         "PreopALB",
         "PreopHGB",
@@ -390,7 +374,6 @@ def encode_categorical_columns(df: pd.DataFrame, numeric_columns: list[str]) -> 
     category_mappings: dict[str, dict[str, int]] = {}
 
     for column in categorical_columns:
-        # BMI 已在前面分箱，应视为多分类变量。
         non_null_count = df[column].dropna().nunique()
         if non_null_count <= 1:
             # 单值列直接填成 0，避免后续建模报错。
@@ -433,11 +416,7 @@ def clean_data(read_path: Path = READ_PATH) -> tuple[pd.DataFrame, dict[str, dic
     if drop_columns:
         df = df.drop(columns=drop_columns)
 
-    # BMI 分箱处理，作为多分类变量。
-    if "BMI" in df.columns:
-        df["BMI"] = df["BMI"].apply(categorize_bmi)
-
-    # 数值列预处理。
+    # 数值列预处理（BMI 也按连续变量纳入）。
     df, numeric_columns = preprocess_numeric_columns(df)
 
     # 按肺部感染分组处理缺失值，再执行统一标准化。
