@@ -1,27 +1,15 @@
+from __future__ import annotations
+
 """清洗头颈肿瘤围手术期原始数据。
 
-功能概述：
-1. 读取 `.xlsx` 原始数据。
-2. 将中文字段名统一为简洁英文名。
-3. 由入院日期、出院日期计算住院时长，并删除原日期列。
-4. 删除不需要直接建模的字段（如身高、体重、手术日期）。
-5. 数据处理前先审阅表格缺失情况，并输出审阅摘要。
-6. 以“肺部感染”为因变量：阳性样本缺失值保留并补齐，阴性样本中高缺失记录直接删除。
-7. 连续变量完成缺失值处理后进行 Z-score 标准化。
-8. 分类变量缺失值以众数填充；二分类编码为 0/1，多分类编码为顺序整数。
-9. BMI 按连续变量处理，完成缺失值填补后进行 Z-score 标准化。
-10. 为类别很多、未来可能出现新类别的字段保存编码映射，便于复用。
-
-说明：
-- 本脚本优先依据“原始数据节选”的列名工作。
-- 在完整数据中，即使分类变量出现更多新类别，脚本也会自动纳入编码映射。
-- 输出三个文件：
-  1) `data1.csv`：清洗后的数据；
-  2) `category_mappings.json`：多分类/二分类字段编码字典；
-  3) `data_review_summary.txt`：处理前数据审阅摘要。
+核心策略：
+1. 统一缺失值与“不明/不详/未知”等标签；
+2. 删除缺失较多（缺失值 + 不明标签占比过高）的变量；
+3. 删除研究中不直接参与建模的原始字段；
+4. 连续变量采用中位数填补并标准化；
+5. 分类变量采用众数填补并编码；
+6. 输出清洗后的整表，后续所有特征筛选均在训练集完成。
 """
-
-from __future__ import annotations
 
 import json
 import math
@@ -30,20 +18,20 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-
+from tqdm.auto import tqdm
 
 READ_PATH = Path("原始数据.xlsx")
 WRITE_PATH = Path("data1.csv")
 MAPPING_PATH = Path("category_mappings.json")
 REVIEW_PATH = Path("data_review_summary.txt")
+DROP_REPORT_PATH = Path("dropped_variables_report.json")
 TARGET_COLUMN = "PulmonaryInfection"
-NEGATIVE_SAMPLE_MISSING_THRESHOLD = 0.06
+VARIABLE_MISSING_THRESHOLD = 0.30
 
+UNKNOWN_LABELS = {
+    "不详", "未知", "不明", "未详", "未明确", "未确定", "nan", "none", "null", "na", "n/a", "missing",
+}
 
-# ---------------------------------------------------------------------------
-# 1. 中文字段名 -> 英文字段名
-# ---------------------------------------------------------------------------
-# 仅保留核心业务含义；如果源数据中存在这些列，则会自动重命名。
 COLUMN_RENAME_MAP = {
     "住院次数": "HospitalizationCount",
     "性别\n（1=男，2=女）": "Sex",
@@ -102,219 +90,137 @@ COLUMN_RENAME_MAP = {
     "是否多重耐药（0=否，1＝是）": "MultiDrugResistance",
 }
 
+FULLWIDTH_TRANSLATION = str.maketrans({"（": "(", "）": ")", "：": ":", "，": ",", "、": ",", "＝": "=", "－": "-", "≤": "<=", "≥": ">=", "　": " "})
+ROMAN_TO_INT = {"Ⅰ": 1, "Ⅱ": 2, "Ⅲ": 3, "Ⅳ": 4, "Ⅴ": 5}
 
-# ---------------------------------------------------------------------------
-# 2. 工具函数
-# ---------------------------------------------------------------------------
+
 def normalize_missing(value: Any) -> Any:
-    """统一识别空值表达。"""
     if pd.isna(value):
         return pd.NA
     if isinstance(value, str):
         cleaned = value.strip()
-        if cleaned == "" or cleaned.lower() in {"nan", "none", "null", "na", "n/a", "不详", "未知"}:
+        if cleaned == "":
+            return pd.NA
+        if cleaned.lower() in UNKNOWN_LABELS:
             return pd.NA
         return cleaned
     return value
 
 
-FULLWIDTH_TRANSLATION = str.maketrans({
-    "（": "(",
-    "）": ")",
-    "：": ":",
-    "，": ",",
-    "、": ",",
-    "＝": "=",
-    "－": "-",
-    "≤": "<=",
-    "≥": ">=",
-    "　": " ",
-})
-
-
 def normalize_category_value(value: Any) -> Any:
-    """标准化分类值，减少同义写法对编码的影响。"""
     value = normalize_missing(value)
     if pd.isna(value):
         return pd.NA
-
     if isinstance(value, str):
         text = value.translate(FULLWIDTH_TRANSLATION)
         text = re.sub(r"\s+", " ", text).strip()
+        if text.lower() in UNKNOWN_LABELS:
+            return pd.NA
         return text
     return value
 
 
-ROMAN_TO_INT = {"Ⅰ": 1, "Ⅱ": 2, "Ⅲ": 3, "Ⅳ": 4, "Ⅴ": 5}
-
-
 def convert_numeric_like(value: Any) -> Any:
-    """尽量把字符串中的数值转成数字；无法转换则保留原值。"""
-    value = normalize_missing(value)
+    value = normalize_category_value(value)
     if pd.isna(value):
         return pd.NA
-
     if isinstance(value, str):
-        text = normalize_category_value(value)
-        if text in ROMAN_TO_INT:
-            return ROMAN_TO_INT[text]
-
-        matched = re.fullmatch(r"[-+]?\d+(?:\.\d+)?", text)
+        if value in ROMAN_TO_INT:
+            return ROMAN_TO_INT[value]
+        matched = re.fullmatch(r"[-+]?\d+(?:\.\d+)?", value)
         if matched:
-            number = float(text)
+            number = float(value)
             return int(number) if number.is_integer() else number
-        return text
     return value
 
 
 def safe_to_datetime(series: pd.Series) -> pd.Series:
-    """把日期列转为 pandas datetime；无法识别的值转为 NaT。"""
     return pd.to_datetime(series.apply(normalize_missing), errors="coerce")
 
 
-# ---------------------------------------------------------------------------
-# 3. 日期与数值字段处理
-# ---------------------------------------------------------------------------
 def add_length_of_stay(df: pd.DataFrame) -> pd.DataFrame:
-    """计算住院时长（天），并删除入院/出院日期列。"""
     if {"AdmissionDate", "DischargeDate"}.issubset(df.columns):
         admission = safe_to_datetime(df["AdmissionDate"])
         discharge = safe_to_datetime(df["DischargeDate"])
-        length_of_stay = (discharge - admission).dt.days
-        # 若数据中存在当天入/出院，希望保留为 0；若出院早于入院，则置为空待后续填补。
-        length_of_stay = length_of_stay.where(length_of_stay >= 0, pd.NA)
-        df["LengthOfStay"] = length_of_stay
+        stay = (discharge - admission).dt.days
+        df["LengthOfStay"] = stay.where(stay >= 0, pd.NA)
         df = df.drop(columns=["AdmissionDate", "DischargeDate"])
     return df
 
 
 def preprocess_numeric_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
-    """识别并整理连续变量。"""
     numeric_candidates = [
-        "HospitalizationCount",
-        "Age",
-        "BMI",
-        "PreopPALB",
-        "PreopALB",
-        "PreopHGB",
-        "OperationDurationMin",
-        "PostopDay0to3ALB",
-        "PostopDay0to3PALB",
-        "DaysToFistulaConfirmation",
-        "LengthOfStay",
+        "HospitalizationCount", "Age", "BMI", "PreopPALB", "PreopALB", "PreopHGB",
+        "OperationDurationMin", "PostopDay0to3ALB", "PostopDay0to3PALB", "DaysToFistulaConfirmation", "LengthOfStay",
     ]
-
-    available_numeric_columns: list[str] = []
-    for column in numeric_candidates:
+    numeric_columns: list[str] = []
+    for column in tqdm(numeric_candidates, desc="识别连续变量", leave=False):
         if column in df.columns:
             df[column] = pd.to_numeric(df[column].apply(convert_numeric_like), errors="coerce")
-            available_numeric_columns.append(column)
+            numeric_columns.append(column)
+    return df, numeric_columns
 
-    return df, available_numeric_columns
+
+def compute_variable_quality(df: pd.DataFrame) -> pd.DataFrame:
+    records: list[dict[str, float | int | str]] = []
+    total_rows = len(df)
+    for column in tqdm(df.columns, desc="统计变量缺失/不明比例", leave=False):
+        series = df[column]
+        normalized = series.apply(normalize_category_value)
+        missing_mask = normalized.isna()
+        unknown_like_ratio = float(missing_mask.mean())
+        records.append({
+            "column": column,
+            "missing_or_unknown_count": int(missing_mask.sum()),
+            "missing_or_unknown_ratio": unknown_like_ratio,
+            "n_unique_non_null": int(normalized.dropna().nunique()),
+            "total_rows": total_rows,
+        })
+    return pd.DataFrame(records).sort_values(["missing_or_unknown_ratio", "missing_or_unknown_count"], ascending=[False, False])
 
 
-# ---------------------------------------------------------------------------
-# 4. 数据审阅与分组缺失值处理
-# ---------------------------------------------------------------------------
-def build_data_review_summary(df: pd.DataFrame, target_column: str = TARGET_COLUMN) -> str:
-    """生成数据处理前的表格审阅摘要。"""
-    total_rows, total_columns = df.shape
+def build_data_review_summary(df: pd.DataFrame, quality_df: pd.DataFrame) -> str:
     lines = [
         "数据处理前审阅摘要",
         "=" * 24,
-        f"样本量: {total_rows}",
-        f"字段数: {total_columns}",
+        f"样本量: {len(df)}",
+        f"字段数: {df.shape[1]}",
+        f"变量删除阈值(缺失值+不明标签占比): {VARIABLE_MISSING_THRESHOLD:.0%}",
         "",
-        "各字段缺失情况（按缺失率降序）:",
+        "各字段缺失/不明情况:",
     ]
-
-    missing_stats = (
-        pd.DataFrame({
-            "missing_count": df.isna().sum(),
-            "missing_ratio": df.isna().mean(),
-        })
-        .sort_values(by=["missing_ratio", "missing_count"], ascending=False)
-    )
-    for column, row in missing_stats.iterrows():
-        lines.append(f"- {column}: 缺失 {int(row['missing_count'])} / {total_rows} ({row['missing_ratio']:.1%})")
-
-    if target_column in df.columns:
-        lines.extend(["", f"按因变量 {target_column} 分组审阅:"])
-        target_missing_mask = df[target_column].isna()
-        if target_missing_mask.any():
-            lines.append(f"- 因变量缺失样本数: {int(target_missing_mask.sum())}")
-
-        for target_value, group_df in df.groupby(target_column, dropna=True):
-            row_missing_ratio = group_df.isna().mean(axis=1)
-            lines.append(
-                f"- {target_column}={target_value}: {len(group_df)} 例，"
-                f"行均缺失率 {row_missing_ratio.mean():.1%}，"
-                f"中位缺失率 {row_missing_ratio.median():.1%}，"
-                f"最大缺失率 {row_missing_ratio.max():.1%}"
-            )
-    else:
-        lines.extend(["", f"未找到因变量列：{target_column}"])
-
+    for _, row in quality_df.iterrows():
+        lines.append(
+            f"- {row['column']}: {int(row['missing_or_unknown_count'])}/{int(row['total_rows'])} "
+            f"({row['missing_or_unknown_ratio']:.1%}), 非空唯一值 {int(row['n_unique_non_null'])}"
+        )
     return "\n".join(lines)
 
 
-def review_raw_data(df: pd.DataFrame, review_path: Path = REVIEW_PATH, target_column: str = TARGET_COLUMN) -> None:
-    """保存并打印数据处理前的审阅结果。"""
-    review_summary = build_data_review_summary(df, target_column=target_column)
-    review_path.write_text(review_summary, encoding="utf-8")
-    print(review_summary)
+def drop_high_missing_variables(df: pd.DataFrame, quality_df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+    dropped_records: list[dict[str, Any]] = []
+    drop_columns: list[str] = []
+    for _, row in quality_df.iterrows():
+        column = row["column"]
+        ratio = float(row["missing_or_unknown_ratio"])
+        if column == TARGET_COLUMN:
+            continue
+        if ratio > VARIABLE_MISSING_THRESHOLD:
+            drop_columns.append(column)
+            dropped_records.append({
+                "column": column,
+                "reason": "high_missing_or_unknown_ratio",
+                "ratio": ratio,
+            })
+    explicit_drop_columns = [column for column in ["Height", "Weight", "OperationDate"] if column in df.columns and column not in drop_columns]
+    for column in explicit_drop_columns:
+        dropped_records.append({"column": column, "reason": "predefined_exclusion", "ratio": None})
+    drop_columns.extend(explicit_drop_columns)
+    return df.drop(columns=drop_columns, errors="ignore"), dropped_records
 
 
-def split_by_target_and_handle_missing(
-    df: pd.DataFrame,
-    numeric_columns: list[str],
-    target_column: str = TARGET_COLUMN,
-    negative_missing_threshold: float = NEGATIVE_SAMPLE_MISSING_THRESHOLD,
-) -> pd.DataFrame:
-    """按肺部感染分组处理缺失值。
-
-    - 阳性样本（1）：保留，并按原规则补齐缺失值；
-    - 阴性样本（0）：若单行缺失率过高，则直接删除；保留部分继续沿用原规则。
-    """
-    if target_column not in df.columns:
-        return df
-
-    positive_mask = df[target_column] == 1
-    negative_mask = df[target_column] == 0
-
-    positive_df = df.loc[positive_mask].copy()
-    negative_df = df.loc[negative_mask].copy()
-    other_df = df.loc[~(positive_mask | negative_mask)].copy()
-
-    if not positive_df.empty:
-        positive_df = fill_numeric_missing_with_median(positive_df, numeric_columns)
-
-    dropped_negative_count = 0
-    if not negative_df.empty:
-        negative_row_missing_ratio = negative_df.isna().mean(axis=1)
-        keep_negative_mask = negative_row_missing_ratio <= negative_missing_threshold
-        dropped_negative_count = int((~keep_negative_mask).sum())
-        negative_df = negative_df.loc[keep_negative_mask].copy()
-        negative_df = fill_numeric_missing_with_median(negative_df, numeric_columns)
-
-    if not other_df.empty:
-        other_df = fill_numeric_missing_with_median(other_df, numeric_columns)
-
-    combined_df = pd.concat([positive_df, negative_df, other_df], axis=0).sort_index()
-    print(
-        "按因变量分组处理缺失值完成："
-        f"阳性样本保留 {len(positive_df)} 例并完成填补；"
-        f"阴性样本删除高缺失 {dropped_negative_count} 例，保留 {len(negative_df)} 例。"
-    )
-    return combined_df
-
-
-# ---------------------------------------------------------------------------
-# 5. 缺失值处理与标准化
-# ---------------------------------------------------------------------------
 def fill_numeric_missing_with_median(df: pd.DataFrame, numeric_columns: list[str]) -> pd.DataFrame:
-    """连续变量以中位数填补缺失值。"""
-    for column in numeric_columns:
+    for column in tqdm(numeric_columns, desc="连续变量缺失填补", leave=False):
         median_value = df[column].median(skipna=True)
         if not pd.isna(median_value):
             df[column] = df[column].fillna(median_value)
@@ -322,8 +228,7 @@ def fill_numeric_missing_with_median(df: pd.DataFrame, numeric_columns: list[str
 
 
 def zscore_standardize(df: pd.DataFrame, numeric_columns: list[str]) -> pd.DataFrame:
-    """连续变量做 Z-score 标准化；若标准差为 0，则整列置为 0。"""
-    for column in numeric_columns:
+    for column in tqdm(numeric_columns, desc="连续变量标准化", leave=False):
         mean_value = df[column].mean(skipna=True)
         std_value = df[column].std(skipna=True, ddof=0)
         if pd.isna(std_value) or math.isclose(std_value, 0.0):
@@ -333,110 +238,77 @@ def zscore_standardize(df: pd.DataFrame, numeric_columns: list[str]) -> pd.DataF
     return df
 
 
-# ---------------------------------------------------------------------------
-# 6. 分类变量编码
-# ---------------------------------------------------------------------------
 def encode_binary_series(series: pd.Series) -> tuple[pd.Series, dict[str, int]]:
-    """二分类变量编码为 0/1。"""
     normalized = series.apply(normalize_category_value)
-    mode = normalized.mode(dropna=True)
-    fill_value = mode.iloc[0] if not mode.empty else "Missing"
-    normalized = normalized.fillna(fill_value)
-
-    unique_values = list(pd.unique(normalized))
-    if len(unique_values) != 2:
-        raise ValueError("当前列不是二分类变量，不能使用 0/1 编码。")
-
-    # 排序保证编码结果稳定；同时尽量让 0/1 编码可复现。
-    sorted_values = sorted(unique_values, key=lambda item: str(item))
-    mapping = {str(value): index for index, value in enumerate(sorted_values)}
-    encoded = normalized.map(lambda item: mapping[str(item)]).astype("Int64")
-    return encoded, mapping
+    fill_value = normalized.mode(dropna=True)
+    normalized = normalized.fillna(fill_value.iloc[0] if not fill_value.empty else "Missing")
+    categories = sorted(str(value) for value in pd.unique(normalized))
+    mapping = {value: idx for idx, value in enumerate(categories)}
+    return normalized.map(lambda item: mapping[str(item)]).astype("Int64"), mapping
 
 
 def encode_multiclass_series(series: pd.Series) -> tuple[pd.Series, dict[str, int]]:
-    """多分类变量编码为顺序整数，并预留 0 作为未知类别编号。"""
     normalized = series.apply(normalize_category_value)
-    mode = normalized.mode(dropna=True)
-    fill_value = mode.iloc[0] if not mode.empty else "Missing"
-    normalized = normalized.fillna(fill_value)
-
-    unique_values = sorted({str(value) for value in pd.unique(normalized)})
-    mapping = {value: index + 1 for index, value in enumerate(unique_values)}
+    fill_value = normalized.mode(dropna=True)
+    normalized = normalized.fillna(fill_value.iloc[0] if not fill_value.empty else "Missing")
+    categories = sorted(str(value) for value in pd.unique(normalized))
+    mapping = {value: idx + 1 for idx, value in enumerate(categories)}
     mapping["__UNKNOWN__"] = 0
-    encoded = normalized.map(lambda item: mapping.get(str(item), 0)).astype("Int64")
-    return encoded, mapping
+    return normalized.map(lambda item: mapping.get(str(item), 0)).astype("Int64"), mapping
 
 
 def encode_categorical_columns(df: pd.DataFrame, numeric_columns: list[str]) -> tuple[pd.DataFrame, dict[str, dict[str, int]]]:
-    """对所有非连续变量做编码，并输出编码字典。"""
     categorical_columns = [column for column in df.columns if column not in numeric_columns]
     category_mappings: dict[str, dict[str, int]] = {}
-
-    for column in categorical_columns:
-        non_null_count = df[column].dropna().nunique()
-        if non_null_count <= 1:
-            # 单值列直接填成 0，避免后续建模报错。
+    for column in tqdm(categorical_columns, desc="分类变量编码", leave=False):
+        n_unique = df[column].dropna().nunique()
+        if n_unique <= 1:
             df[column] = 0
             category_mappings[column] = {"SingleValue": 0}
-            continue
-
-        if non_null_count == 2:
-            df[column], mapping = encode_binary_series(df[column])
+        elif n_unique == 2:
+            df[column], category_mappings[column] = encode_binary_series(df[column])
         else:
-            df[column], mapping = encode_multiclass_series(df[column])
-        category_mappings[column] = mapping
-
+            df[column], category_mappings[column] = encode_multiclass_series(df[column])
     return df, category_mappings
 
 
-# ---------------------------------------------------------------------------
-# 7. 主流程
-# ---------------------------------------------------------------------------
-def clean_data(read_path: Path = READ_PATH) -> tuple[pd.DataFrame, dict[str, dict[str, int]]]:
-    """执行完整清洗流程。"""
-    # 读取 xlsx；完整数据中如果工作表名称不同，默认读取第一个工作表。
+def clean_data(read_path: Path = READ_PATH) -> tuple[pd.DataFrame, dict[str, dict[str, int]], list[dict[str, Any]], pd.DataFrame]:
+    tqdm.write("开始读取原始数据...")
     df = pd.read_excel(read_path)
-
-    # 统一原始空值表示。
-    df = df.applymap(normalize_missing)
-
-    # 字段改名：只对当前存在的列执行映射，避免因完整数据列略有变化而报错。
+    tqdm.write("开始统一字段与缺失值表达...")
+    df = df.apply(lambda col: col.map(normalize_missing))
     rename_map = {column: COLUMN_RENAME_MAP[column] for column in df.columns if column in COLUMN_RENAME_MAP}
     df = df.rename(columns=rename_map)
-
-    # 正式处理前先审阅表格数据。
-    review_raw_data(df)
-
-    # 计算住院时长，并删除原日期列。
     df = add_length_of_stay(df)
 
-    # 删除明确要求丢弃的字段。
-    drop_columns = [column for column in ["Height", "Weight", "OperationDate"] if column in df.columns]
-    if drop_columns:
-        df = df.drop(columns=drop_columns)
+    quality_df = compute_variable_quality(df)
+    REVIEW_PATH.write_text(build_data_review_summary(df, quality_df), encoding="utf-8")
 
-    # 数值列预处理（BMI 也按连续变量纳入）。
+    df, dropped_records = drop_high_missing_variables(df, quality_df)
     df, numeric_columns = preprocess_numeric_columns(df)
-
-    # 按肺部感染分组处理缺失值，再执行统一标准化。
-    df = split_by_target_and_handle_missing(df, numeric_columns)
+    df = fill_numeric_missing_with_median(df, numeric_columns)
     df = zscore_standardize(df, numeric_columns)
-
-    # 分类变量众数填补 + 编码。
     df, category_mappings = encode_categorical_columns(df, numeric_columns)
-    return df, category_mappings
+    return df, category_mappings, dropped_records, quality_df
 
 
-def save_outputs(df: pd.DataFrame, category_mappings: dict[str, dict[str, int]]) -> None:
-    """保存清洗结果和编码字典。"""
+def save_outputs(df: pd.DataFrame, category_mappings: dict[str, dict[str, int]], dropped_records: list[dict[str, Any]], quality_df: pd.DataFrame) -> None:
     df.to_csv(WRITE_PATH, index=False, encoding="utf-8-sig")
     MAPPING_PATH.write_text(json.dumps(category_mappings, ensure_ascii=False, indent=2), encoding="utf-8")
+    DROP_REPORT_PATH.write_text(
+        json.dumps({
+            "variable_missing_threshold": VARIABLE_MISSING_THRESHOLD,
+            "dropped_variables": dropped_records,
+            "variable_quality": quality_df.to_dict(orient="records"),
+        }, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 if __name__ == "__main__":
-    cleaned_df, mappings = clean_data()
-    save_outputs(cleaned_df, mappings)
+    cleaned_df, mappings, dropped_variables, quality_table = clean_data()
+    save_outputs(cleaned_df, mappings, dropped_variables, quality_table)
     print(f"数据清洗完成，已输出：{WRITE_PATH}")
     print(f"分类映射已保存：{MAPPING_PATH}")
+    print(f"变量删除报告已保存：{DROP_REPORT_PATH}")
     print(f"数据审阅摘要已保存：{REVIEW_PATH}")
