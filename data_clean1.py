@@ -5,17 +5,20 @@
 2. 将中文字段名统一为简洁英文名。
 3. 由入院日期、出院日期计算住院时长，并删除原日期列。
 4. 删除不需要直接建模的字段（如身高、体重、手术日期）。
-5. 连续变量缺失值以中位数填充，并进行 Z-score 标准化。
-6. 分类变量缺失值以众数填充；二分类编码为 0/1，多分类编码为顺序整数。
-7. BMI 按照 <18.5、18.5-23.9、>=24 分为三类后再编码。
-8. 为类别很多、未来可能出现新类别的字段保存编码映射，便于复用。
+5. 数据处理前先审阅表格缺失情况，并输出审阅摘要。
+6. 以“肺部感染”为因变量：阳性样本缺失值保留并补齐，阴性样本中高缺失记录直接删除。
+7. 连续变量完成缺失值处理后进行 Z-score 标准化。
+8. 分类变量缺失值以众数填充；二分类编码为 0/1，多分类编码为顺序整数。
+9. BMI 按照 <18.5、18.5-23.9、>=24 分为三类后再编码。
+10. 为类别很多、未来可能出现新类别的字段保存编码映射，便于复用。
 
 说明：
 - 本脚本优先依据“原始数据节选”的列名工作。
 - 在完整数据中，即使分类变量出现更多新类别，脚本也会自动纳入编码映射。
-- 输出两个文件：
+- 输出三个文件：
   1) `data1.csv`：清洗后的数据；
-  2) `category_mappings.json`：多分类/二分类字段编码字典。
+  2) `category_mappings.json`：多分类/二分类字段编码字典；
+  3) `data_review_summary.txt`：处理前数据审阅摘要。
 """
 
 from __future__ import annotations
@@ -32,6 +35,9 @@ import pandas as pd
 READ_PATH = Path("原始数据节选.xlsx")
 WRITE_PATH = Path("data1.csv")
 MAPPING_PATH = Path("category_mappings.json")
+REVIEW_PATH = Path("data_review_summary.txt")
+TARGET_COLUMN = "PulmonaryInfection"
+NEGATIVE_SAMPLE_MISSING_THRESHOLD = 0.30
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +230,103 @@ def preprocess_numeric_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str
 
 
 # ---------------------------------------------------------------------------
-# 4. 缺失值处理与标准化
+# 4. 数据审阅与分组缺失值处理
+# ---------------------------------------------------------------------------
+def build_data_review_summary(df: pd.DataFrame, target_column: str = TARGET_COLUMN) -> str:
+    """生成数据处理前的表格审阅摘要。"""
+    total_rows, total_columns = df.shape
+    lines = [
+        "数据处理前审阅摘要",
+        "=" * 24,
+        f"样本量: {total_rows}",
+        f"字段数: {total_columns}",
+        "",
+        "各字段缺失情况（按缺失率降序）:",
+    ]
+
+    missing_stats = (
+        pd.DataFrame({
+            "missing_count": df.isna().sum(),
+            "missing_ratio": df.isna().mean(),
+        })
+        .sort_values(by=["missing_ratio", "missing_count"], ascending=False)
+    )
+    for column, row in missing_stats.iterrows():
+        lines.append(f"- {column}: 缺失 {int(row['missing_count'])} / {total_rows} ({row['missing_ratio']:.1%})")
+
+    if target_column in df.columns:
+        lines.extend(["", f"按因变量 {target_column} 分组审阅:"])
+        target_missing_mask = df[target_column].isna()
+        if target_missing_mask.any():
+            lines.append(f"- 因变量缺失样本数: {int(target_missing_mask.sum())}")
+
+        for target_value, group_df in df.groupby(target_column, dropna=True):
+            row_missing_ratio = group_df.isna().mean(axis=1)
+            lines.append(
+                f"- {target_column}={target_value}: {len(group_df)} 例，"
+                f"行均缺失率 {row_missing_ratio.mean():.1%}，"
+                f"中位缺失率 {row_missing_ratio.median():.1%}，"
+                f"最大缺失率 {row_missing_ratio.max():.1%}"
+            )
+    else:
+        lines.extend(["", f"未找到因变量列：{target_column}"])
+
+    return "\n".join(lines)
+
+
+def review_raw_data(df: pd.DataFrame, review_path: Path = REVIEW_PATH, target_column: str = TARGET_COLUMN) -> None:
+    """保存并打印数据处理前的审阅结果。"""
+    review_summary = build_data_review_summary(df, target_column=target_column)
+    review_path.write_text(review_summary, encoding="utf-8")
+    print(review_summary)
+
+
+def split_by_target_and_handle_missing(
+    df: pd.DataFrame,
+    numeric_columns: list[str],
+    target_column: str = TARGET_COLUMN,
+    negative_missing_threshold: float = NEGATIVE_SAMPLE_MISSING_THRESHOLD,
+) -> pd.DataFrame:
+    """按肺部感染分组处理缺失值。
+
+    - 阳性样本（1）：保留，并按原规则补齐缺失值；
+    - 阴性样本（0）：若单行缺失率过高，则直接删除；保留部分继续沿用原规则。
+    """
+    if target_column not in df.columns:
+        return df
+
+    positive_mask = df[target_column] == 1
+    negative_mask = df[target_column] == 0
+
+    positive_df = df.loc[positive_mask].copy()
+    negative_df = df.loc[negative_mask].copy()
+    other_df = df.loc[~(positive_mask | negative_mask)].copy()
+
+    if not positive_df.empty:
+        positive_df = fill_numeric_missing_with_median(positive_df, numeric_columns)
+
+    dropped_negative_count = 0
+    if not negative_df.empty:
+        negative_row_missing_ratio = negative_df.isna().mean(axis=1)
+        keep_negative_mask = negative_row_missing_ratio <= negative_missing_threshold
+        dropped_negative_count = int((~keep_negative_mask).sum())
+        negative_df = negative_df.loc[keep_negative_mask].copy()
+        negative_df = fill_numeric_missing_with_median(negative_df, numeric_columns)
+
+    if not other_df.empty:
+        other_df = fill_numeric_missing_with_median(other_df, numeric_columns)
+
+    combined_df = pd.concat([positive_df, negative_df, other_df], axis=0).sort_index()
+    print(
+        "按因变量分组处理缺失值完成："
+        f"阳性样本保留 {len(positive_df)} 例并完成填补；"
+        f"阴性样本删除高缺失 {dropped_negative_count} 例，保留 {len(negative_df)} 例。"
+    )
+    return combined_df
+
+
+# ---------------------------------------------------------------------------
+# 5. 缺失值处理与标准化
 # ---------------------------------------------------------------------------
 def fill_numeric_missing_with_median(df: pd.DataFrame, numeric_columns: list[str]) -> pd.DataFrame:
     """连续变量以中位数填补缺失值。"""
@@ -248,7 +350,7 @@ def zscore_standardize(df: pd.DataFrame, numeric_columns: list[str]) -> pd.DataF
 
 
 # ---------------------------------------------------------------------------
-# 5. 分类变量编码
+# 6. 分类变量编码
 # ---------------------------------------------------------------------------
 def encode_binary_series(series: pd.Series) -> tuple[pd.Series, dict[str, int]]:
     """二分类变量编码为 0/1。"""
@@ -306,7 +408,7 @@ def encode_categorical_columns(df: pd.DataFrame, numeric_columns: list[str]) -> 
 
 
 # ---------------------------------------------------------------------------
-# 6. 主流程
+# 7. 主流程
 # ---------------------------------------------------------------------------
 def clean_data(read_path: Path = READ_PATH) -> tuple[pd.DataFrame, dict[str, dict[str, int]]]:
     """执行完整清洗流程。"""
@@ -319,6 +421,9 @@ def clean_data(read_path: Path = READ_PATH) -> tuple[pd.DataFrame, dict[str, dic
     # 字段改名：只对当前存在的列执行映射，避免因完整数据列略有变化而报错。
     rename_map = {column: COLUMN_RENAME_MAP[column] for column in df.columns if column in COLUMN_RENAME_MAP}
     df = df.rename(columns=rename_map)
+
+    # 正式处理前先审阅表格数据。
+    review_raw_data(df)
 
     # 计算住院时长，并删除原日期列。
     df = add_length_of_stay(df)
@@ -335,8 +440,8 @@ def clean_data(read_path: Path = READ_PATH) -> tuple[pd.DataFrame, dict[str, dic
     # 数值列预处理。
     df, numeric_columns = preprocess_numeric_columns(df)
 
-    # 连续变量缺失值填补 + Z-score 标准化。
-    df = fill_numeric_missing_with_median(df, numeric_columns)
+    # 按肺部感染分组处理缺失值，再执行统一标准化。
+    df = split_by_target_and_handle_missing(df, numeric_columns)
     df = zscore_standardize(df, numeric_columns)
 
     # 分类变量众数填补 + 编码。
@@ -355,3 +460,4 @@ if __name__ == "__main__":
     save_outputs(cleaned_df, mappings)
     print(f"数据清洗完成，已输出：{WRITE_PATH}")
     print(f"分类映射已保存：{MAPPING_PATH}")
+    print(f"数据审阅摘要已保存：{REVIEW_PATH}")
