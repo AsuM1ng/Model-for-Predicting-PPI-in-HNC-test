@@ -1,126 +1,112 @@
-"""基于清洗后的围手术期数据执行多因素 Logistic 回归分析。
+"""基于 LASSO + 相关性过滤后的训练集特征开展多因素 Logistic 回归。
 
-主要作用：
-1. 从 `data1.csv` 读取已经由 `data_clean1.py` 清洗并编码的数据；
-2. 按 `data_clean1.py` 中统一后的英文字段名选择自变量与因变量；
-3. 绘制自变量相关性热力图并检查多重共线性；
-4. 拟合多因素 Logistic 回归模型并输出 OR、P 值和置信区间。
+流程：
+1. 读取 `lasso.py` 生成的训练集和最终特征列表；
+2. 仅在训练集中拟合多因素 Logistic 回归；
+3. 输出各变量 OR、95%CI、P 值；
+4. 保存独立预测因素结果，供机器学习建模脚本复用。
 """
 
-import matplotlib.pyplot as plt
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
-import seaborn as sns
 import statsmodels.api as sm
 
-
-# 统一使用 data_clean1.py 中的清洗后字段名。
-FEATURE_COLUMNS = [
-    'Sex', 'Age', 'BMI', 'PriorHeadNeckHistory', 'CoronaryHeartDisease', 'Hypertension',
-    'PeripheralVascularDisease', 'ImmuneDisease', 'Diabetes', 'Hyperlipidemia', 'SteroidUse',
-    'SmokingHistory', 'AlcoholHistory', 'PreopPALB', 'PreopALB', 'PreopHGB',
-    'PreopOropharyngealSwab', 'LesionSite', 'ASA', 'PreopAntibiotic', 'OperationDurationMin',
-    'IntraopTransfusion', 'AnastomosisType', 'NeckDissection', 'PreopRadiotherapy',
-    'PreopChemotherapy', 'PreopConcurrentCRT', 'Endoscopy', 'FlapType', 'Tracheostomy',
-    'PostopPathology', 'Differentiation', 'pTNMStage', 'MultiplePrimary', 'PostopDay0to3ALB',
-    'PostopDay0to3PALB', 'UnplannedReoperation', 'PulmonaryInfection', 'AnastomoticFistula',
-    'DaysToFistulaConfirmation', 'FatLiquefaction', 'MultiDrugResistance'
-]
-TARGET_COLUMN = 'IncisionInfection'
-CORRELATION_PLOT_PATH = 'correlation_heatmap2.png'
+OUTPUT_DIR = Path('analysis_outputs')
+TRAIN_PATH = OUTPUT_DIR / 'train_set.csv'
+FILTERED_FEATURES_PATH = OUTPUT_DIR / 'selected_features_after_correlation.json'
+LOGISTIC_RESULTS_PATH = OUTPUT_DIR / 'multivariable_logistic_results.csv'
+INDEPENDENT_FEATURES_PATH = OUTPUT_DIR / 'independent_predictors.json'
+TARGET_COLUMN = 'PulmonaryInfection'
+P_VALUE_THRESHOLD = 0.05
 
 
-# 读取清洗后的建模数据。
-try:
-    perioperative_data = pd.read_csv('data1.csv')
-except FileNotFoundError:
-    print("错误：无法找到 'data1.csv' 文件，请先运行 data_clean1.py 生成清洗数据！")
-    raise SystemExit(1)
+def load_inputs() -> tuple[pd.DataFrame, list[str]]:
+    if not TRAIN_PATH.exists():
+        raise FileNotFoundError('未找到 analysis_outputs/train_set.csv，请先运行 lasso.py。')
+    if not FILTERED_FEATURES_PATH.exists():
+        raise FileNotFoundError('未找到 selected_features_after_correlation.json，请先运行 lasso.py。')
+
+    train_df = pd.read_csv(TRAIN_PATH)
+    with FILTERED_FEATURES_PATH.open('r', encoding='utf-8') as file:
+        payload = json.load(file)
+    features = payload.get('final_features', [])
+    if not features:
+        raise ValueError('相关性过滤后的特征列表为空，无法进行多因素 Logistic 回归。')
+    return train_df, features
 
 
-# 按统一字段名提取自变量和因变量。
-try:
-    X = perioperative_data[FEATURE_COLUMNS].copy()
-    y = perioperative_data[TARGET_COLUMN].astype(int)
-except KeyError as error:
-    print(f"错误：列 {error} 不存在，请检查 data1.csv 是否由最新版本的 data_clean1.py 生成！")
-    raise SystemExit(1)
+def prepare_design_matrix(train_df: pd.DataFrame, features: list[str]) -> tuple[pd.DataFrame, pd.Series]:
+    missing_columns = [column for column in [*features, TARGET_COLUMN] if column not in train_df.columns]
+    if missing_columns:
+        raise KeyError(f'训练集中缺少以下列：{missing_columns}')
+
+    X = train_df[features].copy()
+    for column in X.columns:
+        if X[column].dtype == 'object' or str(X[column].dtype).startswith('category'):
+            X[column] = pd.factorize(X[column].astype(str))[0]
+    X = X.apply(pd.to_numeric, errors='coerce')
+    X = X.replace([np.inf, -np.inf], np.nan)
+    X = X.fillna(X.median(numeric_only=True))
+    y = train_df[TARGET_COLUMN].astype(int)
+    return X, y
 
 
-# 清洗后数据理论上已经是数值型；此处保留安全检查，防止旧数据文件混入文本列。
-for column in X.columns:
-    if X[column].dtype == 'object' or X[column].dtype.name == 'category':
-        print(f"\n检测到非数值列 '{column}'，正在进行编码...")
-        X[column] = pd.factorize(X[column])[0]
-    elif not np.issubdtype(X[column].dtype, np.number):
-        print(f"错误：列 '{column}' 包含非数值数据，请检查！")
-        raise SystemExit(1)
+def fit_multivariable_logistic(X: pd.DataFrame, y: pd.Series) -> pd.DataFrame:
+    X_with_const = sm.add_constant(X, has_constant='add')
+    model = sm.Logit(y, X_with_const)
+    result = model.fit(disp=False, maxiter=200)
+
+    confidence_intervals = result.conf_int()
+    records: list[dict[str, float | str]] = []
+    for column in X.columns:
+        coefficient = float(result.params[column])
+        lower_ci = float(confidence_intervals.loc[column, 0])
+        upper_ci = float(confidence_intervals.loc[column, 1])
+        p_value = float(result.pvalues[column])
+        records.append({
+            'feature': column,
+            'coefficient': coefficient,
+            'odds_ratio': float(np.exp(coefficient)),
+            'p_value': p_value,
+            'or_95ci_lower': float(np.exp(lower_ci)),
+            'or_95ci_upper': float(np.exp(upper_ci)),
+            'is_independent_predictor': p_value < P_VALUE_THRESHOLD,
+        })
+
+    return pd.DataFrame(records).sort_values(['p_value', 'feature'], ascending=[True, True])
 
 
-# 绘制特征相关性热力图，帮助识别线性相关较强的变量。
-corr_matrix = X.corr(numeric_only=True)
-plt.figure(figsize=(10, 8))
-sns.heatmap(
-    corr_matrix,
-    annot=False,
-    cmap='coolwarm',
-    vmin=-1,
-    vmax=1,
-    center=0,
-    fmt='.2f',
-    square=True,
-)
-plt.xticks(rotation=45, ha='right')
-plt.tight_layout()
-plt.savefig(CORRELATION_PLOT_PATH, dpi=300, bbox_inches='tight')
-plt.show()
+def main() -> None:
+    train_df, features = load_inputs()
+    X, y = prepare_design_matrix(train_df, features)
+    results_df = fit_multivariable_logistic(X, y)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    results_df.to_csv(LOGISTIC_RESULTS_PATH, index=False, encoding='utf-8-sig')
+
+    independent_predictors = results_df.loc[
+        results_df['is_independent_predictor'], 'feature'
+    ].tolist()
+    with INDEPENDENT_FEATURES_PATH.open('w', encoding='utf-8') as file:
+        json.dump(
+            {
+                'target': TARGET_COLUMN,
+                'p_value_threshold': P_VALUE_THRESHOLD,
+                'independent_predictors': independent_predictors,
+            },
+            file,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    print('=== 多因素 Logistic 回归完成 ===')
+    print(results_df.to_string(index=False))
+    print(f'独立预测因素 ({len(independent_predictors)} 个): {independent_predictors}')
 
 
-# 若变量间绝对相关系数超过阈值，则删除其中一列以降低多重共线性影响。
-print("\n检查多重共线性（相关系数 > 0.60）...")
-corr_matrix = X.corr(numeric_only=True).abs()
-upper_triangle = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-columns_to_drop = [column for column in upper_triangle.columns if any(upper_triangle[column] > 0.6)]
-if columns_to_drop:
-    print(f"警告：以下列存在高相关性，将移除：{columns_to_drop}")
-    X = X.drop(columns=columns_to_drop)
-
-
-# 添加截距项并拟合多因素 Logistic 回归模型。
-X = sm.add_constant(X)
-print("\n=== 多因素 Logistic 回归分析 ===")
-logit_model = sm.Logit(y, X)
-result = logit_model.fit(disp=1, maxiter=200)
-print("\n模型概要：")
-print(result.summary())
-
-
-# 汇总每个自变量的回归系数、OR 值、P 值和 95% 置信区间。
-results = []
-confidence_intervals = result.conf_int()
-for column in X.columns:
-    if column == 'const':
-        continue
-
-    coefficient = result.params[column]
-    confidence_interval = confidence_intervals.loc[column]
-    p_value = result.pvalues[column]
-    odds_ratio = np.exp(coefficient)
-    results.append({
-        '变量': column,
-        '回归系数': round(coefficient, 4),
-        '优势比 (OR)': round(odds_ratio, 4),
-        'P值': round(p_value, 4),
-        '95% 置信区间下限 (OR)': round(np.exp(confidence_interval[0]), 4),
-        '95% 置信区间上限 (OR)': round(np.exp(confidence_interval[1]), 4),
-    })
-
-results_df = pd.DataFrame(results)
-print("\n多因素 Logistic 回归结果：")
-print(results_df)
-
-
-# 按阈值筛选潜在独立危险因素，便于后续进一步解释。
-independent_factors = results_df[results_df['P值'] < 0.1]
-print("\n=== 独立危险因素 (P < 0.1) ===")
-print(independent_factors)
+if __name__ == '__main__':
+    main()
