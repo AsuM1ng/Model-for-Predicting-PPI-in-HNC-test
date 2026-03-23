@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-"""基于独立预测因素构建6种机器学习模型并进行验证、调参与解释。"""
+"""基于独立预测因素构建多种机器学习模型并进行调参、验证与解释。"""
 
 import json
 import warnings
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -30,15 +33,10 @@ except ImportError:  # pragma: no cover
 warnings.filterwarnings("ignore", category=ConvergenceWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
-OUTPUT_DIR = Path("analysis_outputs")
-TRAIN_PATH = OUTPUT_DIR / "train_set.csv"
-TEST_PATH = OUTPUT_DIR / "test_set.csv"
-INDEPENDENT_FEATURES_PATH = OUTPUT_DIR / "independent_predictors.json"
-METRICS_PATH = OUTPUT_DIR / "ml_model_metrics.csv"
-BOOTSTRAP_PATH = OUTPUT_DIR / "bootstrap_auc_summary.csv"
-TUNING_PATH = OUTPUT_DIR / "ml_model_best_params.json"
-ROC_PATH = OUTPUT_DIR / "roc_curves.png"
-SHAP_DIR = OUTPUT_DIR / "shap"
+OUTPUT_ROOT = Path("analysis_outputs")
+TRAIN_PATH = OUTPUT_ROOT / "train_set.csv"
+TEST_PATH = OUTPUT_ROOT / "test_set.csv"
+INDEPENDENT_FEATURES_PATH = OUTPUT_ROOT / "independent_predictors.json"
 TARGET_COLUMN = "PulmonaryInfection"
 RANDOM_STATE = 42
 CV_REPEATS = 100
@@ -47,6 +45,34 @@ TUNING_CV_REPEATS = 5
 TUNING_CV_SPLITS = 5
 TUNING_ITER = 20
 BOOTSTRAP_ROUNDS = 1000
+N_JOBS = 1
+
+
+def build_run_paths() -> dict[str, Path]:
+    timestamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%d_%H%M%S_UTC")
+    run_dir = OUTPUT_ROOT / f"perioperative_model_run_{timestamp}"
+    return {
+        "run_dir": run_dir,
+        "metrics": run_dir / "ml_model_metrics.csv",
+        "bootstrap": run_dir / "bootstrap_auc_summary.csv",
+        "tuning": run_dir / "ml_model_best_params.json",
+        "roc": run_dir / "roc_curves.png",
+        "report": run_dir / "run_summary.md",
+        "shap_dir": run_dir / "shap",
+    }
+
+
+def normalize_shap_values(shap_values) -> np.ndarray:
+    if hasattr(shap_values, "values"):
+        shap_values = shap_values.values
+    if isinstance(shap_values, list):
+        shap_values = shap_values[-1]
+    shap_values = np.asarray(shap_values)
+    if shap_values.ndim == 3:
+        shap_values = shap_values[:, :, -1]
+    if shap_values.ndim != 2:
+        raise ValueError(f"无法解析SHAP输出维度: {shap_values.shape}")
+    return shap_values
 
 
 def normalize_shap_values(shap_values) -> np.ndarray:
@@ -140,11 +166,7 @@ def build_model_specs() -> dict[str, dict[str, object]]:
     }
     if XGBClassifier is not None:
         model_specs["XGBoost"] = {
-            "estimator": XGBClassifier(
-                eval_metric="logloss",
-                random_state=RANDOM_STATE,
-                use_label_encoder=False,
-            ),
+            "estimator": XGBClassifier(eval_metric="logloss", random_state=RANDOM_STATE),
             "param_distributions": {
                 "n_estimators": [200, 300, 500, 800],
                 "max_depth": [2, 3, 4, 5, 6],
@@ -165,14 +187,15 @@ def build_model_specs() -> dict[str, dict[str, object]]:
 def tune_model(model_name: str, estimator, param_distributions: dict[str, list[object]], X_train: pd.DataFrame, y_train: pd.Series):
     tqdm.write(f"开始调参：{model_name}")
     tuning_cv = RepeatedStratifiedKFold(n_splits=TUNING_CV_SPLITS, n_repeats=TUNING_CV_REPEATS, random_state=RANDOM_STATE)
+    candidate_count = int(np.prod([len(v) for v in param_distributions.values()]))
     search = RandomizedSearchCV(
         estimator=estimator,
         param_distributions=param_distributions,
-        n_iter=min(TUNING_ITER, int(np.prod([len(v) for v in param_distributions.values()]))),
+        n_iter=min(TUNING_ITER, candidate_count),
         scoring="roc_auc",
         cv=tuning_cv,
         random_state=RANDOM_STATE,
-        n_jobs=-1,
+        n_jobs=N_JOBS,
         refit=True,
     )
     search.fit(X_train, y_train)
@@ -210,9 +233,9 @@ def bootstrap_auc_ci(model, X_train: pd.DataFrame, y_train: pd.Series, X_test: p
     return float(lower), float(median), float(upper)
 
 
-def explain_model(model_name: str, model, X_train: pd.DataFrame, X_test: pd.DataFrame) -> None:
+def explain_model(model_name: str, model, X_train: pd.DataFrame, X_test: pd.DataFrame, shap_dir: Path) -> None:
     tqdm.write(f"开始进行 {model_name} 的SHAP解释...")
-    SHAP_DIR.mkdir(parents=True, exist_ok=True)
+    shap_dir.mkdir(parents=True, exist_ok=True)
     sample_train = X_train.sample(min(80, len(X_train)), random_state=RANDOM_STATE)
     sample_test = X_test.sample(min(80, len(X_test)), random_state=RANDOM_STATE)
     classifier = model.named_steps["classifier"] if isinstance(model, Pipeline) else model
@@ -236,18 +259,61 @@ def explain_model(model_name: str, model, X_train: pd.DataFrame, X_test: pd.Data
         plt.figure()
         shap.summary_plot(shap_matrix, transformed_test, show=False)
         plt.tight_layout()
-        plt.savefig(SHAP_DIR / f"{model_name}_shap_summary.png", dpi=300, bbox_inches="tight")
+        plt.savefig(shap_dir / f"{model_name}_shap_summary.png", dpi=300, bbox_inches="tight")
         plt.close()
         plt.figure()
         shap.summary_plot(shap_matrix, transformed_test, plot_type="bar", show=False)
         plt.tight_layout()
-        plt.savefig(SHAP_DIR / f"{model_name}_shap_bar.png", dpi=300, bbox_inches="tight")
+        plt.savefig(shap_dir / f"{model_name}_shap_bar.png", dpi=300, bbox_inches="tight")
         plt.close()
     except Exception as exc:  # pragma: no cover
-        (SHAP_DIR / f"{model_name}_shap_fallback.json").write_text(json.dumps({"error": str(exc)}, ensure_ascii=False, indent=2), encoding="utf-8")
+        (shap_dir / f"{model_name}_shap_fallback.json").write_text(json.dumps({"error": str(exc)}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def write_run_report(run_paths: dict[str, Path], features: list[str], metrics_df: pd.DataFrame, tuning_records: dict[str, dict[str, object]]) -> None:
+    report_lines = [
+        "# 建模结果信息文档",
+        "",
+        f"- 运行目录: `{run_paths['run_dir']}`",
+        f"- 训练集路径: `{TRAIN_PATH}`",
+        f"- 测试集路径: `{TEST_PATH}`",
+        f"- 特征数量: {len(features)}",
+        f"- 特征列表: {', '.join(features)}",
+        "",
+        "## 关键参数",
+        f"- RANDOM_STATE: {RANDOM_STATE}",
+        f"- CV_SPLITS: {CV_SPLITS}",
+        f"- CV_REPEATS: {CV_REPEATS}",
+        f"- TUNING_CV_SPLITS: {TUNING_CV_SPLITS}",
+        f"- TUNING_CV_REPEATS: {TUNING_CV_REPEATS}",
+        f"- TUNING_ITER: {TUNING_ITER}",
+        f"- BOOTSTRAP_ROUNDS: {BOOTSTRAP_ROUNDS}",
+        f"- N_JOBS: {N_JOBS}",
+        "",
+        "## 输出文件",
+        f"- 指标汇总: `{run_paths['metrics'].name}`",
+        f"- Bootstrap汇总: `{run_paths['bootstrap'].name}`",
+        f"- 最佳参数: `{run_paths['tuning'].name}`",
+        f"- ROC图: `{run_paths['roc'].name}`",
+        f"- SHAP目录: `{run_paths['shap_dir'].name}`",
+        "",
+        "## 模型结果预览",
+        metrics_df.to_markdown(index=False),
+        "",
+        "## 各模型最佳参数",
+    ]
+    for model_name, payload in tuning_records.items():
+        report_lines.append(f"### {model_name}")
+        report_lines.append(f"- best_cv_auc: {payload['best_cv_auc']:.6f}")
+        report_lines.append(f"- best_params: `{json.dumps(payload['best_params'], ensure_ascii=False, sort_keys=True)}`")
+        report_lines.append("")
+    run_paths["report"].write_text("\n".join(report_lines), encoding="utf-8")
 
 
 if __name__ == "__main__":
+    run_paths = build_run_paths()
+    run_paths["shap_dir"].mkdir(parents=True, exist_ok=True)
+
     with tqdm(total=5, desc="ML-perioperative总进度") as progress:
         train_df, test_df, features = load_datasets()
         progress.update(1)
@@ -258,7 +324,6 @@ if __name__ == "__main__":
 
         model_specs = build_model_specs()
         cv = RepeatedStratifiedKFold(n_splits=CV_SPLITS, n_repeats=CV_REPEATS, random_state=RANDOM_STATE)
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         progress.update(1)
 
         metrics_records: list[dict[str, float | str]] = []
@@ -269,7 +334,7 @@ if __name__ == "__main__":
         for model_name, spec in tqdm(model_specs.items(), desc="模型训练、调参与评估"):
             tqdm.write(f"开始处理模型：{model_name}")
             tuned_model, tuning_auc, best_params = tune_model(model_name, spec["estimator"], spec["param_distributions"], X_train, y_train)
-            cv_scores = cross_val_score(tuned_model, X_train, y_train, scoring="roc_auc", cv=cv, n_jobs=-1)
+            cv_scores = cross_val_score(tuned_model, X_train, y_train, scoring="roc_auc", cv=cv, n_jobs=N_JOBS)
             fitted_model = clone(tuned_model)
             fitted_model.fit(X_train, y_train)
             y_prob = fitted_model.predict_proba(X_test)[:, 1]
@@ -290,13 +355,13 @@ if __name__ == "__main__":
                 "n_features": len(features),
             })
             bootstrap_records.append({"model": model_name, "auc_ci_lower": auc_lower, "auc_ci_median": auc_median, "auc_ci_upper": auc_upper})
-            explain_model(model_name, fitted_model, X_train, X_test)
+            explain_model(model_name, fitted_model, X_train, X_test, run_paths["shap_dir"])
         progress.update(1)
 
         metrics_df = pd.DataFrame(metrics_records).sort_values(["test_auc", "cv_auc_mean"], ascending=False)
-        metrics_df.to_csv(METRICS_PATH, index=False, encoding="utf-8-sig")
-        pd.DataFrame(bootstrap_records).to_csv(BOOTSTRAP_PATH, index=False, encoding="utf-8-sig")
-        TUNING_PATH.write_text(json.dumps(tuning_records, ensure_ascii=False, indent=2), encoding="utf-8")
+        metrics_df.to_csv(run_paths["metrics"], index=False, encoding="utf-8-sig")
+        pd.DataFrame(bootstrap_records).to_csv(run_paths["bootstrap"], index=False, encoding="utf-8-sig")
+        run_paths["tuning"].write_text(json.dumps(tuning_records, ensure_ascii=False, indent=2), encoding="utf-8")
 
         plt.figure(figsize=(8, 6))
         for model_name, roc_data in roc_payload.items():
@@ -307,9 +372,11 @@ if __name__ == "__main__":
         plt.title("ROC Curves on Test Set")
         plt.legend()
         plt.tight_layout()
-        plt.savefig(ROC_PATH, dpi=300, bbox_inches="tight")
+        plt.savefig(run_paths["roc"], dpi=300, bbox_inches="tight")
         plt.close()
+        write_run_report(run_paths, features, metrics_df, tuning_records)
         progress.update(1)
 
     print("=== 机器学习建模完成 ===")
+    print(f"输出目录：{run_paths['run_dir']}")
     print(metrics_df.to_string(index=False))
