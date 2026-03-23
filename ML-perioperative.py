@@ -18,7 +18,7 @@ from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, roc_auc_score, roc_curve
-from sklearn.model_selection import RandomizedSearchCV, RepeatedStratifiedKFold, cross_val_predict, cross_val_score
+from sklearn.model_selection import RandomizedSearchCV, RepeatedStratifiedKFold, StratifiedKFold, cross_val_predict, cross_val_score
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -43,6 +43,7 @@ CV_REPEATS = 100
 CV_SPLITS = 10
 TUNING_CV_REPEATS = 5
 TUNING_CV_SPLITS = 5
+THRESHOLD_CV_SPLITS = 5
 TUNING_ITER = 20
 BOOTSTRAP_ROUNDS = 1000
 THRESHOLD_GRID_SIZE = 201
@@ -310,6 +311,7 @@ def write_run_report(run_paths: dict[str, Path], features: list[str], metrics_df
         f"- TUNING_CV_SPLITS: {TUNING_CV_SPLITS}",
         f"- TUNING_CV_REPEATS: {TUNING_CV_REPEATS}",
         f"- TUNING_ITER: {TUNING_ITER}",
+        f"- THRESHOLD_CV_SPLITS: {THRESHOLD_CV_SPLITS}",
         f"- BOOTSTRAP_ROUNDS: {BOOTSTRAP_ROUNDS}",
         f"- THRESHOLD_GRID_SIZE: {THRESHOLD_GRID_SIZE}",
         f"- MIN_SPECIFICITY_FLOOR: {MIN_SPECIFICITY_FLOOR}",
@@ -360,7 +362,8 @@ if __name__ == "__main__":
             tqdm.write(f"开始处理模型：{model_name}")
             tuned_model, tuning_auc, best_params = tune_model(model_name, spec["estimator"], spec["param_distributions"], X_train, y_train)
             cv_scores = cross_val_score(tuned_model, X_train, y_train, scoring="roc_auc", cv=cv, n_jobs=N_JOBS)
-            oof_prob = cross_val_predict(tuned_model, X_train, y_train, cv=cv, method="predict_proba", n_jobs=N_JOBS)[:, 1]
+            threshold_cv = StratifiedKFold(n_splits=THRESHOLD_CV_SPLITS, shuffle=True, random_state=RANDOM_STATE)
+            oof_prob = cross_val_predict(tuned_model, X_train, y_train, cv=threshold_cv, method="predict_proba", n_jobs=N_JOBS)[:, 1]
             best_threshold, threshold_payload = select_threshold_for_sensitivity(y_train, oof_prob)
             fitted_model = clone(tuned_model)
             fitted_model.fit(X_train, y_train)
