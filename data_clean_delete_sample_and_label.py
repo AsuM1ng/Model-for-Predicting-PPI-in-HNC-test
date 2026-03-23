@@ -5,12 +5,13 @@
 2. 将中文字段名统一为简洁英文名。
 3. 由入院日期、出院日期计算住院时长，并删除原日期列。
 4. 删除不需要直接建模的字段（如身高、体重、手术日期）。
-5. 数据处理前先审阅表格缺失情况，并输出审阅摘要。
-6. 以“肺部感染”为因变量：阳性样本缺失值保留并补齐，阴性样本中高缺失记录直接删除。
-7. 连续变量完成缺失值处理后进行 Z-score 标准化。
-8. 分类变量缺失值以众数填充；二分类编码为 0/1，多分类编码为顺序整数。
-9. BMI 按连续变量处理，完成缺失值填补后进行 Z-score 标准化。
-10. 为类别很多、未来可能出现新类别的字段保存编码映射，便于复用。
+5. 数据处理前先统计各字段缺失率，并输出审阅摘要。
+6. 缺失率高于 25% 的字段直接删除。
+7. 以“肺部感染”为因变量：保留字段中，阳性样本缺失值补齐，阴性样本含缺失的记录直接删除。
+8. 连续变量完成缺失值处理后进行 Z-score 标准化。
+9. 分类变量缺失值以众数填充；二分类编码为 0/1，多分类编码为顺序整数。
+10. BMI 按连续变量处理，完成缺失值填补后进行 Z-score 标准化。
+11. 为类别很多、未来可能出现新类别的字段保存编码映射，便于复用。
 
 说明：
 - 本脚本优先依据“原始数据节选”的列名工作。
@@ -37,7 +38,7 @@ WRITE_PATH = Path("data1.csv")
 MAPPING_PATH = Path("category_mappings.json")
 REVIEW_PATH = Path("data_review_summary.txt")
 TARGET_COLUMN = "PulmonaryInfection"
-NEGATIVE_SAMPLE_MISSING_THRESHOLD = 0.06
+FEATURE_MISSING_THRESHOLD = 0.25
 
 
 # ---------------------------------------------------------------------------
@@ -265,16 +266,44 @@ def review_raw_data(df: pd.DataFrame, review_path: Path = REVIEW_PATH, target_co
     print(review_summary)
 
 
+def report_and_drop_high_missing_features(
+    df: pd.DataFrame,
+    feature_missing_threshold: float = FEATURE_MISSING_THRESHOLD,
+    target_column: str = TARGET_COLUMN,
+) -> tuple[pd.DataFrame, list[str]]:
+    """统计各字段缺失率，删除缺失率过高的字段，并输出结果。"""
+    missing_ratio = df.isna().mean().sort_values(ascending=False)
+    print("\n各字段缺失率统计：")
+    for column, ratio in missing_ratio.items():
+        print(f"- {column}: {ratio:.1%}")
+
+    high_missing_features = [
+        column
+        for column, ratio in missing_ratio.items()
+        if ratio > feature_missing_threshold and column != target_column
+    ]
+
+    if high_missing_features:
+        print(f"\n缺失率高于 {feature_missing_threshold:.0%} 的字段将被删除：")
+        for column in high_missing_features:
+            print(f"- {column}")
+        df = df.drop(columns=high_missing_features)
+    else:
+        print(f"\n没有字段的缺失率高于 {feature_missing_threshold:.0%}。")
+
+    return df, high_missing_features
+
+
 def split_by_target_and_handle_missing(
     df: pd.DataFrame,
     numeric_columns: list[str],
     target_column: str = TARGET_COLUMN,
-    negative_missing_threshold: float = NEGATIVE_SAMPLE_MISSING_THRESHOLD,
 ) -> pd.DataFrame:
-    """按肺部感染分组处理缺失值。
+    """按肺部感染分组处理保留字段中的缺失值。
 
     - 阳性样本（1）：保留，并按原规则补齐缺失值；
-    - 阴性样本（0）：若单行缺失率过高，则直接删除；保留部分继续沿用原规则。
+    - 阴性样本（0）：只要存在缺失值则直接删除；
+    - 其他样本：沿用原规则补齐连续变量。
     """
     if target_column not in df.columns:
         return df
@@ -291,11 +320,9 @@ def split_by_target_and_handle_missing(
 
     dropped_negative_count = 0
     if not negative_df.empty:
-        negative_row_missing_ratio = negative_df.isna().mean(axis=1)
-        keep_negative_mask = negative_row_missing_ratio <= negative_missing_threshold
+        keep_negative_mask = ~negative_df.isna().any(axis=1)
         dropped_negative_count = int((~keep_negative_mask).sum())
         negative_df = negative_df.loc[keep_negative_mask].copy()
-        negative_df = fill_numeric_missing_with_median(negative_df, numeric_columns)
 
     if not other_df.empty:
         other_df = fill_numeric_missing_with_median(other_df, numeric_columns)
@@ -304,7 +331,7 @@ def split_by_target_and_handle_missing(
     print(
         "按因变量分组处理缺失值完成："
         f"阳性样本保留 {len(positive_df)} 例并完成填补；"
-        f"阴性样本删除高缺失 {dropped_negative_count} 例，保留 {len(negative_df)} 例。"
+        f"阴性样本删除含缺失 {dropped_negative_count} 例，保留 {len(negative_df)} 例。"
     )
     return combined_df
 
@@ -407,6 +434,9 @@ def clean_data(read_path: Path = READ_PATH) -> tuple[pd.DataFrame, dict[str, dic
 
     # 正式处理前先审阅表格数据。
     review_raw_data(df)
+
+    # 统计各字段缺失率，并删除高缺失字段。
+    df, _ = report_and_drop_high_missing_features(df)
 
     # 计算住院时长，并删除原日期列。
     df = add_length_of_stay(df)
