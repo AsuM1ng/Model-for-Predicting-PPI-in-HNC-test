@@ -75,6 +75,19 @@ def normalize_shap_values(shap_values) -> np.ndarray:
     return shap_values
 
 
+def normalize_shap_values(shap_values) -> np.ndarray:
+    if hasattr(shap_values, "values"):
+        shap_values = shap_values.values
+    if isinstance(shap_values, list):
+        shap_values = shap_values[-1]
+    shap_values = np.asarray(shap_values)
+    if shap_values.ndim == 3:
+        shap_values = shap_values[:, :, -1]
+    if shap_values.ndim != 2:
+        raise ValueError(f"无法解析SHAP输出维度: {shap_values.shape}")
+    return shap_values
+
+
 def load_datasets() -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
     train_df = pd.read_csv(TRAIN_PATH)
     test_df = pd.read_csv(TEST_PATH)
