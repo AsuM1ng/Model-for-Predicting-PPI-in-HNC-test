@@ -18,7 +18,7 @@ from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, roc_auc_score, roc_curve
-from sklearn.model_selection import RandomizedSearchCV, RepeatedStratifiedKFold, cross_val_score
+from sklearn.model_selection import RandomizedSearchCV, RepeatedStratifiedKFold, cross_val_predict, cross_val_score
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -45,11 +45,13 @@ TUNING_CV_REPEATS = 5
 TUNING_CV_SPLITS = 5
 TUNING_ITER = 20
 BOOTSTRAP_ROUNDS = 1000
+THRESHOLD_GRID_SIZE = 201
+MIN_SPECIFICITY_FLOOR = 0.60
 N_JOBS = 1
 
 
 def build_run_paths() -> dict[str, Path]:
-    timestamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%d_%H%M%S_UTC")
+    timestamp = pd.Timestamp.now(tz="Asia/Shanghai").strftime("%Y%m%d_%H%M%S_BJT")
     run_dir = OUTPUT_ROOT / f"perioperative_model_run_{timestamp}"
     return {
         "run_dir": run_dir,
@@ -60,19 +62,6 @@ def build_run_paths() -> dict[str, Path]:
         "report": run_dir / "run_summary.md",
         "shap_dir": run_dir / "shap",
     }
-
-
-def normalize_shap_values(shap_values) -> np.ndarray:
-    if hasattr(shap_values, "values"):
-        shap_values = shap_values.values
-    if isinstance(shap_values, list):
-        shap_values = shap_values[-1]
-    shap_values = np.asarray(shap_values)
-    if shap_values.ndim == 3:
-        shap_values = shap_values[:, :, -1]
-    if shap_values.ndim != 2:
-        raise ValueError(f"无法解析SHAP输出维度: {shap_values.shape}")
-    return shap_values
 
 
 def normalize_shap_values(shap_values) -> np.ndarray:
@@ -203,6 +192,40 @@ def tune_model(model_name: str, estimator, param_distributions: dict[str, list[o
     return search.best_estimator_, float(search.best_score_), search.best_params_
 
 
+def select_threshold_for_sensitivity(y_true: pd.Series, y_prob: np.ndarray) -> tuple[float, dict[str, float]]:
+    candidate_thresholds = np.unique(np.clip(np.concatenate(([0.0, 1.0], np.linspace(0.0, 1.0, THRESHOLD_GRID_SIZE), y_prob)), 0.0, 1.0))
+    best_payload: dict[str, float] | None = None
+    best_threshold = 0.5
+    for threshold in candidate_thresholds:
+        metrics = evaluate_threshold_metrics(y_true, y_prob, float(threshold))
+        payload = {"threshold": float(threshold), **metrics}
+        if best_payload is None:
+            best_payload = payload
+            best_threshold = float(threshold)
+            continue
+        current_feasible = payload["specificity"] >= MIN_SPECIFICITY_FLOOR
+        best_feasible = best_payload["specificity"] >= MIN_SPECIFICITY_FLOOR
+        candidate_score = (current_feasible, payload["sensitivity"], payload["f1"], payload["specificity"], payload["accuracy"], -abs(payload["threshold"] - 0.5))
+        best_score = (best_feasible, best_payload["sensitivity"], best_payload["f1"], best_payload["specificity"], best_payload["accuracy"], -abs(best_payload["threshold"] - 0.5))
+        if candidate_score > best_score:
+            best_payload = payload
+            best_threshold = float(threshold)
+    if best_payload is None:
+        raise ValueError("阈值搜索失败。")
+    return best_threshold, best_payload
+
+
+def smooth_roc_curve(fpr: np.ndarray, tpr: np.ndarray, points: int = 400) -> tuple[np.ndarray, np.ndarray]:
+    dense_fpr = np.linspace(0.0, 1.0, points)
+    unique_fpr, unique_idx = np.unique(fpr, return_index=True)
+    unique_tpr = tpr[unique_idx]
+    dense_tpr = np.interp(dense_fpr, unique_fpr, unique_tpr)
+    dense_tpr = np.maximum.accumulate(dense_tpr)
+    dense_tpr[0] = 0.0
+    dense_tpr[-1] = 1.0
+    return dense_fpr, np.clip(dense_tpr, 0.0, 1.0)
+
+
 def evaluate_threshold_metrics(y_true: pd.Series, y_prob: np.ndarray, threshold: float = 0.5) -> dict[str, float]:
     y_pred = (y_prob >= threshold).astype(int)
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
@@ -288,6 +311,8 @@ def write_run_report(run_paths: dict[str, Path], features: list[str], metrics_df
         f"- TUNING_CV_REPEATS: {TUNING_CV_REPEATS}",
         f"- TUNING_ITER: {TUNING_ITER}",
         f"- BOOTSTRAP_ROUNDS: {BOOTSTRAP_ROUNDS}",
+        f"- THRESHOLD_GRID_SIZE: {THRESHOLD_GRID_SIZE}",
+        f"- MIN_SPECIFICITY_FLOOR: {MIN_SPECIFICITY_FLOOR}",
         f"- N_JOBS: {N_JOBS}",
         "",
         "## 输出文件",
@@ -335,16 +360,22 @@ if __name__ == "__main__":
             tqdm.write(f"开始处理模型：{model_name}")
             tuned_model, tuning_auc, best_params = tune_model(model_name, spec["estimator"], spec["param_distributions"], X_train, y_train)
             cv_scores = cross_val_score(tuned_model, X_train, y_train, scoring="roc_auc", cv=cv, n_jobs=N_JOBS)
+            oof_prob = cross_val_predict(tuned_model, X_train, y_train, cv=cv, method="predict_proba", n_jobs=N_JOBS)[:, 1]
+            best_threshold, threshold_payload = select_threshold_for_sensitivity(y_train, oof_prob)
             fitted_model = clone(tuned_model)
             fitted_model.fit(X_train, y_train)
             y_prob = fitted_model.predict_proba(X_test)[:, 1]
-            metrics = evaluate_threshold_metrics(y_test, y_prob)
+            metrics = evaluate_threshold_metrics(y_test, y_prob, threshold=best_threshold)
             auc_lower, auc_median, auc_upper = bootstrap_auc_ci(fitted_model, X_train, y_train, X_test, y_test)
             fpr, tpr, _ = roc_curve(y_test, y_prob)
-            roc_payload[model_name] = {"fpr": fpr.tolist(), "tpr": tpr.tolist()}
-            tuning_records[model_name] = {"best_cv_auc": tuning_auc, "best_params": best_params}
+            smooth_fpr, smooth_tpr = smooth_roc_curve(fpr, tpr)
+            roc_payload[model_name] = {"fpr": smooth_fpr.tolist(), "tpr": smooth_tpr.tolist()}
+            tuning_records[model_name] = {"best_cv_auc": tuning_auc, "best_params": best_params, "best_threshold": best_threshold, "threshold_selection_metrics": threshold_payload}
             metrics_records.append({
                 "model": model_name,
+                "selected_threshold": best_threshold,
+                "threshold_train_sensitivity": threshold_payload["sensitivity"],
+                "threshold_train_specificity": threshold_payload["specificity"],
                 "tuning_auc": tuning_auc,
                 "cv_auc_mean": float(np.mean(cv_scores)),
                 "cv_auc_std": float(np.std(cv_scores, ddof=1)),
