@@ -6,7 +6,7 @@
 3. 由入院日期、出院日期计算住院时长，并删除原日期列。
 4. 删除不需要直接建模的字段（如身高、体重、手术日期）。
 5. 数据处理前先统计各字段缺失率，并输出审阅摘要。
-6. 缺失率高于 25% 的字段直接删除。
+6. 缺失率高于 30% 的字段直接删除。
 7. 以“肺部感染”为因变量：保留字段中，阳性样本缺失值补齐，阴性样本含缺失的记录直接删除。
 8. 连续变量完成缺失值处理后进行 Z-score 标准化。
 9. 分类变量缺失值以众数填充；二分类编码为 0/1，多分类编码为顺序整数。
@@ -33,12 +33,13 @@ from typing import Any
 import pandas as pd
 
 
-READ_PATH = Path("原始数据.xlsx")
+READ_PATH = Path("0变空缺.xlsx")
 WRITE_PATH = Path("data1.csv")
 MAPPING_PATH = Path("category_mappings.json")
 REVIEW_PATH = Path("data_review_summary.txt")
 TARGET_COLUMN = "PulmonaryInfection"
-FEATURE_MISSING_THRESHOLD = 0.25
+FEATURE_MISSING_THRESHOLD = 0.3
+column_to_drop = ["HospitalizationCount", "PrimaryDiagnosis", "PrimarySurgeryName", "DischargeDepartment", "Height", "Weight", "OperationDate", "SurgeryName"]
 
 
 # ---------------------------------------------------------------------------
@@ -442,7 +443,7 @@ def clean_data(read_path: Path = READ_PATH) -> tuple[pd.DataFrame, dict[str, dic
     df = add_length_of_stay(df)
 
     # 删除明确要求丢弃的字段。
-    drop_columns = [column for column in ["Height", "Weight", "OperationDate"] if column in df.columns]
+    drop_columns = [column for column in column_to_drop if column in df.columns]
     if drop_columns:
         df = df.drop(columns=drop_columns)
 
