@@ -1,0 +1,19 @@
+{
+  "selected_by_lasso": [
+    "AlcoholHistory",
+    "PreopHGB",
+    "PreopConcurrentCRT",
+    "Hypertension",
+    "PreopALB",
+    "BMI",
+    "LesionSite",
+    "PeripheralVascularDisease",
+    "Hyperlipidemia",
+    "Diabetes",
+    "CoronaryHeartDisease",
+    "PriorHeadNeckHistory",
+    "Age"
+  ],
+  "random_state": 42,
+  "test_size": 0.3
+}

@@ -1,0 +1,12 @@
+{
+  "target": "PulmonaryInfection",
+  "p_value_threshold": 0.05,
+  "independent_predictors": [
+    "PreopConcurrentCRT",
+    "NeckDissection",
+    "Pathogen",
+    "MultiDrugResistance",
+    "AnastomoticFistula",
+    "AlcoholHistory"
+  ]
+}

@@ -15,7 +15,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from tqdm.auto import tqdm
 
-DATA_PATH = Path("data1.csv")
+DATA_PATH = Path("data2.csv")
 TARGET_COLUMN = "PulmonaryInfection"
 TEST_SIZE = 0.3
 RANDOM_STATE = 42

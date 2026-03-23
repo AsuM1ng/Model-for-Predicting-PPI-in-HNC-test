@@ -1,0 +1,20 @@
+{
+  "target": "PulmonaryInfection",
+  "correlation_threshold": 0.6,
+  "final_features": [
+    "AlcoholHistory",
+    "PreopHGB",
+    "PreopConcurrentCRT",
+    "Hypertension",
+    "PreopALB",
+    "BMI",
+    "LesionSite",
+    "PeripheralVascularDisease",
+    "Hyperlipidemia",
+    "Diabetes",
+    "CoronaryHeartDisease",
+    "PriorHeadNeckHistory",
+    "Age"
+  ],
+  "removed_pairs": []
+}

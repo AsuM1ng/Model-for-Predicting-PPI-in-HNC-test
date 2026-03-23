@@ -1,0 +1,119 @@
+{
+  "GLM": {
+    "best_cv_auc": 0.8099784418065221,
+    "best_params": {
+      "classifier__penalty": "l2",
+      "classifier__C": 0.01
+    },
+    "best_threshold": 0.4211046251031865,
+    "threshold_selection_metrics": {
+      "threshold": 0.4211046251031865,
+      "test_auc": 0.8002097635392829,
+      "accuracy": 0.6046119235095613,
+      "sensitivity": 0.8333333333333334,
+      "specificity": 0.6006864988558352,
+      "f1": 0.06640106241699867
+    }
+  },
+  "RF": {
+    "best_cv_auc": 0.7943458589166326,
+    "best_params": {
+      "n_estimators": 800,
+      "min_samples_split": 2,
+      "min_samples_leaf": 10,
+      "max_features": "log2",
+      "max_depth": 5,
+      "class_weight": "balanced"
+    },
+    "best_threshold": 0.42437423318141476,
+    "threshold_selection_metrics": {
+      "threshold": 0.42437423318141476,
+      "test_auc": 0.7705282227307398,
+      "accuracy": 0.6136107986501688,
+      "sensitivity": 0.8,
+      "specificity": 0.6104118993135011,
+      "f1": 0.0653061224489796
+    }
+  },
+  "SVM": {
+    "best_cv_auc": 0.8259878291717834,
+    "best_params": {
+      "classifier__kernel": "rbf",
+      "classifier__gamma": 0.001,
+      "classifier__C": 0.1
+    },
+    "best_threshold": 0.013293013944226884,
+    "threshold_selection_metrics": {
+      "threshold": 0.013293013944226884,
+      "test_auc": 0.823512585812357,
+      "accuracy": 0.610236220472441,
+      "sensitivity": 0.9,
+      "specificity": 0.6052631578947368,
+      "f1": 0.07228915662650602
+    }
+  },
+  "NNET": {
+    "best_cv_auc": 0.823898758357211,
+    "best_params": {
+      "classifier__solver": "adam",
+      "classifier__learning_rate_init": 0.01,
+      "classifier__hidden_layer_sizes": [
+        32
+      ],
+      "classifier__batch_size": 16,
+      "classifier__alpha": 0.01,
+      "classifier__activation": "tanh"
+    },
+    "best_threshold": 0.01664241619233148,
+    "threshold_selection_metrics": {
+      "threshold": 0.01664241619233148,
+      "test_auc": 0.795156369183829,
+      "accuracy": 0.6355455568053994,
+      "sensitivity": 0.8,
+      "specificity": 0.6327231121281465,
+      "f1": 0.06896551724137931
+    }
+  },
+  "GBM": {
+    "best_cv_auc": 0.7983767498976668,
+    "best_params": {
+      "subsample": 0.8,
+      "n_estimators": 300,
+      "min_samples_leaf": 1,
+      "max_depth": 3,
+      "learning_rate": 0.01
+    },
+    "best_threshold": 0.020151113080403883,
+    "threshold_selection_metrics": {
+      "threshold": 0.020151113080403883,
+      "test_auc": 0.7787566742944317,
+      "accuracy": 0.7755905511811023,
+      "sensitivity": 0.7333333333333333,
+      "specificity": 0.7763157894736842,
+      "f1": 0.09932279909706546
+    }
+  },
+  "XGBoost": {
+    "best_cv_auc": 0.7638652749351889,
+    "best_params": {
+      "subsample": 0.8,
+      "reg_lambda": 2.0,
+      "reg_alpha": 0.1,
+      "n_estimators": 500,
+      "min_child_weight": 1,
+      "max_depth": 3,
+      "learning_rate": 0.1,
+      "gamma": 0.3,
+      "colsample_bytree": 0.8
+    },
+    "best_threshold": 0.01681314967572689,
+    "threshold_selection_metrics": {
+      "threshold": 0.01681314967572689,
+      "test_auc": 0.7655129672006102,
+      "accuracy": 0.6580427446569179,
+      "sensitivity": 0.8,
+      "specificity": 0.6556064073226545,
+      "f1": 0.07317073170731707
+    }
+  }
+}

@@ -47,10 +47,13 @@ plt.rcParams['font.sans-serif'] = ['SimHei']
 plt.rcParams['axes.unicode_minus'] = False
 
 # ========== 加载数据 ==========
-data = pd.read_csv("data1.csv")
+data = pd.read_csv("data2.csv")
 
-features = ['PreopConcurrentCRT', 'NeckDissection', 'Pathogen',
-            'MultiDrugResistance', 'AnastomoticFistula', 'AlcoholHistory']
+features = [
+    "PreopConcurrentCRT",
+    "PreopHGB",
+    "AlcoholHistory"
+  ]
 # X = data.drop(columns=['Post-operative admission to ICU','Multi-drug resistance','Anastomotic fistula','Mechanical ventilation time', 'Mechanical ventilation',
 #                        'Intraoperative blood transfusion','Infection status','Preoperative radiotherapy',
 #                        'Preoperative chemotherapy','Preoperative concurrent radiochemotherapy'])

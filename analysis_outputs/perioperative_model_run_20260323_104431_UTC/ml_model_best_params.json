@@ -1,0 +1,65 @@
+{
+  "GLM": {
+    "best_cv_auc": 0.8099784418065221,
+    "best_params": {
+      "classifier__penalty": "l2",
+      "classifier__C": 0.01
+    }
+  },
+  "RF": {
+    "best_cv_auc": 0.7943458589166326,
+    "best_params": {
+      "n_estimators": 800,
+      "min_samples_split": 2,
+      "min_samples_leaf": 10,
+      "max_features": "log2",
+      "max_depth": 5,
+      "class_weight": "balanced"
+    }
+  },
+  "SVM": {
+    "best_cv_auc": 0.8259878291717834,
+    "best_params": {
+      "classifier__kernel": "rbf",
+      "classifier__gamma": 0.001,
+      "classifier__C": 0.1
+    }
+  },
+  "NNET": {
+    "best_cv_auc": 0.823898758357211,
+    "best_params": {
+      "classifier__solver": "adam",
+      "classifier__learning_rate_init": 0.01,
+      "classifier__hidden_layer_sizes": [
+        32
+      ],
+      "classifier__batch_size": 16,
+      "classifier__alpha": 0.01,
+      "classifier__activation": "tanh"
+    }
+  },
+  "GBM": {
+    "best_cv_auc": 0.7983767498976668,
+    "best_params": {
+      "subsample": 0.8,
+      "n_estimators": 300,
+      "min_samples_leaf": 1,
+      "max_depth": 3,
+      "learning_rate": 0.01
+    }
+  },
+  "XGBoost": {
+    "best_cv_auc": 0.7638652749351889,
+    "best_params": {
+      "subsample": 0.8,
+      "reg_lambda": 2.0,
+      "reg_alpha": 0.1,
+      "n_estimators": 500,
+      "min_child_weight": 1,
+      "max_depth": 3,
+      "learning_rate": 0.1,
+      "gamma": 0.3,
+      "colsample_bytree": 0.8
+    }
+  }
+}

@@ -49,8 +49,11 @@ plt.rcParams['axes.unicode_minus'] = False
 # ========== 加载数据 ==========
 data = pd.read_csv("ca1_cleaned2.csv")
 
-features = ['PreopConcurrentCRT', 'NeckDissection', 'Pathogen',
-            'MultiDrugResistance', 'AnastomoticFistula', 'AlcoholHistory']
+features = [
+    "PreopConcurrentCRT",
+    "PreopHGB",
+    "AlcoholHistory"
+  ]
 # X = data.drop(columns=['Post-operative admission to ICU','Multi-drug resistance','Anastomotic fistula','Mechanical ventilation time', 'Mechanical ventilation',
 #                        'Intraoperative blood transfusion','Infection status','Preoperative radiotherapy',
 #                        'Preoperative chemotherapy','Preoperative concurrent radiochemotherapy'])
