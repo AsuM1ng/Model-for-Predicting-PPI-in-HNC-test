@@ -63,6 +63,8 @@ features = [
 X = data[features]
 y = data['PulmonaryInfection']
 
+min_ratio = 0.017   # 保持正/负比约束
+min_keep = 2200   # 至少保留样本数（你要求的）
 
 # ========== 分割数据 ==========
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
@@ -73,7 +75,7 @@ print(f"原比例 - 训练: {len(X_train)/len(data):.2f}, 测试: {len(X_test)/l
 models = {
     'GLM': LogisticRegression(class_weight='balanced'),
     'RF': RandomForestClassifier(class_weight='balanced'),
-    'SVM': SVC(probability=True, class_weight='balanced'),
+    # 'SVM': SVC(probability=True, class_weight='balanced'),
     'NNET': MLPClassifier(max_iter=1000),
     'NB': GaussianNB()
 }
@@ -81,7 +83,7 @@ models = {
 param_grids = {
     'GLM': {'classifier__C': [0.1, 1, 10]},
     'RF': {'classifier__n_estimators': [50, 100], 'classifier__max_depth': [None, 10]},
-    'SVM': {'classifier__C': [0.1, 1], 'classifier__kernel': ['linear', 'rbf']},
+    # 'SVM': {'classifier__C': [0.1, 1], 'classifier__kernel': ['linear', 'rbf']},
     'NNET': {'classifier__hidden_layer_sizes': [(50,), (100,)], 'classifier__alpha': [0.0001, 0.001]},
     'NB': {'smote__k_neighbors': [3, 5]}
 }
@@ -268,7 +270,6 @@ orig_neg = int(len(y) - orig_pos)
 print(f"\n原始正样本：{orig_pos}, 原始负样本：{orig_neg}, 原始正/负比 = {orig_pos/orig_neg:.4f}")
 
 # 设置最小正/负比约束
-min_ratio = 0.1
 
 # ------------------- 约束性删除 Hard（优先删最 hard，保留 CA1 全列，至少保留 2200） -------------------
 
@@ -372,8 +373,6 @@ if orig_neg == 0:
 
 print(f"\n原始正样本：{orig_pos}, 原始负样本：{orig_neg}, 原始正/负比 = {orig_pos/orig_neg:.4f}")
 
-min_ratio = 0.017   # 保持正/负比约束
-min_keep = 2430   # 至少保留样本数（你要求的）
 
 current_pos = orig_pos
 current_neg = orig_neg
@@ -420,7 +419,7 @@ print(f"清理后正例数: {int(ca1_cleaned['PulmonaryInfection'].sum())}")
 print(f"清理后负例数: {len(ca1_cleaned) - int(ca1_cleaned['PulmonaryInfection'].sum())}")
 
 # 保存最终完整 CA1（含全部列）
-outname = "ca1_cleaned2.csv"
+outname = "data1sisclean.csv"
 ca1_cleaned.to_csv(outname, index=False)
 print(f"\n已保存：{outname}（含 CA1 所有原始列）")
 

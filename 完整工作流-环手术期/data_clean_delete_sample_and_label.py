@@ -25,24 +25,25 @@
 from __future__ import annotations
 
 import json
-import math
 import re
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from scipy.stats import chi2_contingency, ttest_ind
 
 
 READ_PATH = Path("0变空缺.xlsx")
 WRITE_PATH = Path("data1.csv")
 MAPPING_PATH = Path("category_mappings.json")
 REVIEW_PATH = Path("data_review_summary.txt")
+STAT_TABLE_PATH = Path("group_statistics.tsv")
 TARGET_COLUMN = "PulmonaryInfection"
 FEATURE_MISSING_THRESHOLD = 0.3
 column_to_drop = ["HospitalizationCount", "DischargeDepartment", "PrimaryDiagnosis", "PrimarySurgeryName",
                   "Height", "Weight", "OperationDate", "Hypertension", "Hyperlipidemia", "SteroidUse", "SurgeryName",
                   "ImmuneDisease",  "UnplannedReoperation", "AnastomoticFistula", "DaysToFistulaConfirmation",
-                  "FatLiquefaction", "IncisionInfection", "Pathogen", "MultiDrugResistance"]
+                  "FatLiquefaction", "IncisionInfection", "Pathogen", "MultiDrugResistance", 'LesionSite', 'PreopAntibiotic', 'FlapType', 'PostopPathology']
 
 
 # ---------------------------------------------------------------------------
@@ -341,7 +342,7 @@ def split_by_target_and_handle_missing(
 
 
 # ---------------------------------------------------------------------------
-# 5. 缺失值处理与标准化
+# 5. 缺失值处理与统计
 # ---------------------------------------------------------------------------
 def fill_numeric_missing_with_median(df: pd.DataFrame, numeric_columns: list[str]) -> pd.DataFrame:
     """连续变量以中位数填补缺失值。"""
@@ -352,16 +353,115 @@ def fill_numeric_missing_with_median(df: pd.DataFrame, numeric_columns: list[str
     return df
 
 
-def zscore_standardize(df: pd.DataFrame, numeric_columns: list[str]) -> pd.DataFrame:
-    """连续变量做 Z-score 标准化；若标准差为 0，则整列置为 0。"""
-    for column in numeric_columns:
-        mean_value = df[column].mean(skipna=True)
-        std_value = df[column].std(skipna=True, ddof=0)
-        if pd.isna(std_value) or math.isclose(std_value, 0.0):
-            df[column] = 0.0
-        else:
-            df[column] = (df[column] - mean_value) / std_value
-    return df
+def format_count_ratio(count: int, denominator: int) -> str:
+    """把计数和占比格式化为 'n (xx.x%)'。"""
+    if denominator <= 0:
+        return "0 (0.0%)"
+    ratio = count / denominator * 100
+    return f"{count} ({ratio:.1f}%)"
+
+
+def format_mean_std(series: pd.Series) -> str:
+    """把连续变量格式化为 '均值 ± 标准差'。"""
+    numeric_series = pd.to_numeric(series, errors="coerce").dropna()
+    if numeric_series.empty:
+        return "NA"
+    mean_value = numeric_series.mean()
+    std_value = numeric_series.std(ddof=1)
+    if pd.isna(std_value):
+        std_value = 0.0
+    return f"{mean_value:.2f} ± {std_value:.2f}"
+
+
+def compute_continuous_pvalue(infection: pd.Series, non_infection: pd.Series) -> str:
+    """计算连续变量组间 p 值（Welch t 检验）。"""
+    infection = pd.to_numeric(infection, errors="coerce").dropna()
+    non_infection = pd.to_numeric(non_infection, errors="coerce").dropna()
+    if len(infection) < 2 or len(non_infection) < 2:
+        return ""
+    pvalue = ttest_ind(infection, non_infection, equal_var=False, nan_policy="omit").pvalue
+    if pd.isna(pvalue):
+        return ""
+    return f"{pvalue:.3f}"
+
+
+def compute_categorical_pvalue(df: pd.DataFrame, column: str, target_column: str) -> str:
+    """计算分类变量组间 p 值（卡方检验）。"""
+    valid_df = df[[column, target_column]].dropna()
+    if valid_df.empty:
+        return ""
+
+    contingency = pd.crosstab(valid_df[column], valid_df[target_column])
+    if contingency.shape[0] < 2 or contingency.shape[1] < 2:
+        return ""
+
+    _, pvalue, _, _ = chi2_contingency(contingency)
+    if pd.isna(pvalue):
+        return ""
+    return f"{pvalue:.3f}"
+
+
+def build_group_statistics_table(
+    df: pd.DataFrame,
+    numeric_columns: list[str],
+    target_column: str = TARGET_COLUMN,
+) -> pd.DataFrame:
+    """按肺部感染分组输出统计表格（分类：n/%；连续：均值±标准差）。"""
+    if target_column not in df.columns:
+        return pd.DataFrame()
+
+    analysis_df = df[df[target_column].isin([0, 1])].copy()
+    if analysis_df.empty:
+        return pd.DataFrame()
+
+    infection_df = analysis_df[analysis_df[target_column] == 1]
+    non_infection_df = analysis_df[analysis_df[target_column] == 0]
+    infection_n = len(infection_df)
+    non_infection_n = len(non_infection_df)
+
+    rows: list[dict[str, str]] = [
+        {"变量": "", "肺部感染": f"N={infection_n}", "非肺部感染": f"N={non_infection_n}", "P-value": ""}
+    ]
+
+    for column in analysis_df.columns:
+        if column == target_column:
+            continue
+
+        if column in numeric_columns:
+            rows.append(
+                {
+                    "变量": column,
+                    "肺部感染": format_mean_std(infection_df[column]),
+                    "非肺部感染": format_mean_std(non_infection_df[column]),
+                    "P-value": compute_continuous_pvalue(infection_df[column], non_infection_df[column]),
+                }
+            )
+            continue
+
+        pvalue = compute_categorical_pvalue(analysis_df, column, target_column)
+        rows.append({"变量": column, "肺部感染": "", "非肺部感染": "", "P-value": pvalue})
+
+        levels = (
+            analysis_df[column]
+            .dropna()
+            .astype(str)
+            .sort_values()
+            .unique()
+            .tolist()
+        )
+        for level in levels:
+            infection_count = int((infection_df[column].astype(str) == level).sum())
+            non_infection_count = int((non_infection_df[column].astype(str) == level).sum())
+            rows.append(
+                {
+                    "变量": f"  {level}",
+                    "肺部感染": format_count_ratio(infection_count, infection_n),
+                    "非肺部感染": format_count_ratio(non_infection_count, non_infection_n),
+                    "P-value": "",
+                }
+            )
+
+    return pd.DataFrame(rows, columns=["变量", "肺部感染", "非肺部感染", "P-value"])
 
 
 # ---------------------------------------------------------------------------
@@ -453,9 +553,16 @@ def clean_data(read_path: Path = READ_PATH) -> tuple[pd.DataFrame, dict[str, dic
     # 数值列预处理（BMI 也按连续变量纳入）。
     df, numeric_columns = preprocess_numeric_columns(df)
 
-    # 按肺部感染分组处理缺失值，再执行统一标准化。
+    # 删除高缺失与指定字段后，输出分组统计表。
+    stats_table = build_group_statistics_table(df, numeric_columns, target_column=TARGET_COLUMN)
+    if not stats_table.empty:
+        print("\n分组统计表：")
+        print(stats_table.to_string(index=False))
+        stats_table.to_csv(STAT_TABLE_PATH, sep="\t", index=False, encoding="utf-8-sig")
+        print(f"分组统计表已保存：{STAT_TABLE_PATH}")
+
+    # 按肺部感染分组处理缺失值，不进行归一化。
     df = split_by_target_and_handle_missing(df, numeric_columns)
-    df = zscore_standardize(df, numeric_columns)
 
     # 分类变量众数填补 + 编码。
     df, category_mappings = encode_categorical_columns(df, numeric_columns)
