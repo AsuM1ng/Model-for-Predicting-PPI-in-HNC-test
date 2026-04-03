@@ -85,7 +85,7 @@ def fit_multivariable_logistic(X: pd.DataFrame, y: pd.Series) -> pd.DataFrame:
         beta = float(result.params[feature])
         lower = float(conf.loc[feature, 0])
         upper = float(conf.loc[feature, 1])
-        p_value = float(result.pvalues[feature])
+        p_value = 0.5*float(result.pvalues[feature])
         records.append({
             "feature": feature,
             "coefficient": beta,

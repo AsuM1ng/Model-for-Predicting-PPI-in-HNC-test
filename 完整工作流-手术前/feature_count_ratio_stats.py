@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""按结局分组统计各分类特征的样本数、比例与 P-value。"""
+"""按结局分组统计离散特征的样本数/比例，连续特征的均值/方差。"""
 
 from __future__ import annotations
 
@@ -16,13 +16,13 @@ EPS = 1e-30
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "统计输入 CSV 中各分类特征在两组结局下的样本数和比例，并使用卡方检验计算 P-value。"
+            "统计输入 CSV 中离散特征在两组结局下的样本数和比例，并统计连续特征的均值和方差。"
         )
     )
     parser.add_argument(
         "--input",
         default="data1sisclean.csv",
-        help="输入 CSV 文件路径（默认 data1.csv）。",
+        help="输入 CSV 文件路径（默认 data1sisclean.csv）。",
     )
     parser.add_argument(
         "--output",
@@ -66,6 +66,26 @@ def format_count_ratio(count: int, total: int) -> str:
     if total <= 0:
         return f"{count} (0.0%)"
     return f"{count} ({count / total * 100:.1f}%)"
+
+
+def parse_float(value: str) -> float | None:
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def mean_variance(values: List[float]) -> Tuple[float, float]:
+    if not values:
+        return 0.0, 0.0
+    mean = sum(values) / len(values)
+    if len(values) == 1:
+        return mean, 0.0
+    variance = sum((x - mean) ** 2 for x in values) / (len(values) - 1)
+    return mean, variance
 
 
 def gammaincc(a: float, x: float) -> float:
@@ -180,11 +200,11 @@ def choose_group_col(columns: Iterable[str], preferred: str) -> str:
 
 def build_table(args: argparse.Namespace) -> List[Dict[str, str]]:
     input_path = Path(args.input)
-    if not input_path.exists() and args.input == "data1-sis.csv":
+    if not input_path.exists() and args.input == "data1sisclean.csv":
         fallback = Path("data1.csv")
         if fallback.exists():
             input_path = fallback
-            print(f"[提示] 未找到 data1-sis.csv，已自动使用 {fallback}。")
+            print(f"[提示] 未找到 data1sisclean.csv，已自动使用 {fallback}。")
 
     columns, rows = read_csv_rows(input_path)
     group_col = choose_group_col(columns, args.group_col)
@@ -207,13 +227,57 @@ def build_table(args: argparse.Namespace) -> List[Dict[str, str]]:
             continue
 
         values = []
+        numeric_values: List[float] = []
+        is_numeric = True
         for row in rows:
             v = (row.get(feature) or "").strip()
             if v:
                 values.append(v)
+                parsed = parse_float(v)
+                if parsed is None:
+                    is_numeric = False
+                else:
+                    numeric_values.append(parsed)
         uniq = sorted(set(values))
 
-        if len(uniq) == 0 or len(uniq) > args.max_categories:
+        if len(uniq) == 0:
+            continue
+
+        # 连续变量：数值型且唯一值较多；离散变量按原逻辑处理不变。
+        if is_numeric and len(uniq) > args.max_categories:
+            pos_numeric = [
+                parsed
+                for r in group_rows["pos"]
+                if (parsed := parse_float((r.get(feature) or "").strip())) is not None
+            ]
+            neg_numeric = [
+                parsed
+                for r in group_rows["neg"]
+                if (parsed := parse_float((r.get(feature) or "").strip())) is not None
+            ]
+            pos_mean, pos_var = mean_variance(pos_numeric)
+            neg_mean, neg_var = mean_variance(neg_numeric)
+            out_rows.append(
+                {
+                    "特征": feature,
+                    "分层": "均值",
+                    f"{args.positive_label} N={pos_n}": f"{pos_mean:.4f}",
+                    f"{args.negative_label} N={neg_n}": f"{neg_mean:.4f}",
+                    "P-value": "",
+                }
+            )
+            out_rows.append(
+                {
+                    "特征": "",
+                    "分层": "方差",
+                    f"{args.positive_label} N={pos_n}": f"{pos_var:.4f}",
+                    f"{args.negative_label} N={neg_n}": f"{neg_var:.4f}",
+                    "P-value": "",
+                }
+            )
+            continue
+
+        if len(uniq) > args.max_categories:
             continue
 
         pos_counter = Counter((r.get(feature) or "").strip() for r in group_rows["pos"])

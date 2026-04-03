@@ -50,13 +50,13 @@ plt.rcParams['axes.unicode_minus'] = False
 data = pd.read_csv("data1.csv")
 # data = pd.read_csv("data1.csv")
 features = [
+    "PreopHGB",
     "PreopConcurrentCRT",
-    "AlcoholHistory",
-    "PreopHGB"
+    "AlcoholHistory"
   ]
 X = data[features]
 y = data['PulmonaryInfection']
-seed = 42
+seed = 15
 ccvv = 10
 # ========== 分割数据 ==========
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=15, stratify=y)
@@ -80,7 +80,7 @@ models = {
     'GLM': LogisticRegression(class_weight='balanced'),
     'RF': RandomForestClassifier(class_weight='balanced'),
     'SVM': SVC(probability=True, class_weight='balanced'),
-    'NNET': MLPClassifier(max_iter=1000),
+    'NNET': MLPClassifier(max_iter=100),
     # 'NB': GaussianNB()
 }
 

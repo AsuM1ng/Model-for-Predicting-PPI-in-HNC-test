@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """基于独立预测因素构建多种机器学习模型并进行调参、验证与解释。"""
+
+from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -39,7 +39,7 @@ TRAIN_PATH = OUTPUT_ROOT / "train_set.csv"
 TEST_PATH = OUTPUT_ROOT / "test_set.csv"
 INDEPENDENT_FEATURES_PATH = OUTPUT_ROOT / "independent_predictors.json"
 TARGET_COLUMN = "PulmonaryInfection"
-RANDOM_STATE = 15
+RANDOM_STATE = 42
 CV_REPEATS = 10
 CV_SPLITS = 10
 TUNING_CV_REPEATS = 5

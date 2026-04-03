@@ -63,8 +63,8 @@ features = [
 X = data[features]
 y = data['PulmonaryInfection']
 
-min_ratio = 0.017   # 保持正/负比约束
-min_keep = 2200   # 至少保留样本数（你要求的）
+min_ratio = 0.0172   # 保持正/负比约束
+min_keep = 2430   # 至少保留样本数（你要求的）
 
 # ========== 分割数据 ==========
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)

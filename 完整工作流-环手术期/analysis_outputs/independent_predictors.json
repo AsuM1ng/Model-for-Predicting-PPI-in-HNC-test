@@ -1,0 +1,11 @@
+{
+  "target": "PulmonaryInfection",
+  "p_value_threshold": 0.05,
+  "independent_predictors": [
+    "PreopConcurrentCRT",
+    "OperationDurationMin",
+    "Tracheostomy",
+    "NeckDissection",
+    "AlcoholHistory"
+  ]
+}

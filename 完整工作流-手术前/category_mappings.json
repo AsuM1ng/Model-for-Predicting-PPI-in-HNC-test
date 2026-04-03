@@ -1,0 +1,56 @@
+{
+  "Sex": {
+    "1": 0,
+    "2": 1
+  },
+  "PriorHeadNeckHistory": {
+    "0": 0,
+    "1": 1
+  },
+  "CoronaryHeartDisease": {
+    "0": 0,
+    "1": 1
+  },
+  "PeripheralVascularDisease": {
+    "0": 0,
+    "1": 1
+  },
+  "Diabetes": {
+    "0": 0,
+    "1": 1
+  },
+  "SmokingHistory": {
+    "0": 0,
+    "1": 1
+  },
+  "AlcoholHistory": {
+    "0": 0,
+    "1": 1
+  },
+  "ASA": {
+    "Ⅰ": 1,
+    "Ⅱ": 2,
+    "Ⅲ": 3,
+    "Ⅳ": 4,
+    "__UNKNOWN__": 0
+  },
+  "PreopRadiotherapy": {
+    "0": 0,
+    "1": 1
+  },
+  "PreopChemotherapy": {
+    "0": 0,
+    "1": 1
+  },
+  "PreopConcurrentCRT": {
+    "0": 1,
+    "1": 2,
+    "2": 3,
+    "3": 4,
+    "__UNKNOWN__": 0
+  },
+  "PulmonaryInfection": {
+    "0": 0,
+    "1": 1
+  }
+}
