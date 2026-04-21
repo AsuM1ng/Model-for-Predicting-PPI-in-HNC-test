@@ -1,0 +1,18 @@
+{
+  "selected_by_lasso": [
+    "PreopHGB",
+    "AlcoholHistory",
+    "PreopConcurrentCRT",
+    "Diabetes",
+    "PreopChemotherapy",
+    "SmokingHistory",
+    "PreopALB",
+    "CoronaryHeartDisease",
+    "PeripheralVascularDisease",
+    "BMI",
+    "ASA",
+    "PreopRadiotherapy"
+  ],
+  "random_state": 42,
+  "test_size": 0.3
+}

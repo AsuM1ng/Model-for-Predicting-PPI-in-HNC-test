@@ -53,6 +53,7 @@ features = [
     "PreopConcurrentCRT",
     "PreopHGB",
     "AlcoholHistory",
+
   ]
 # X = data.drop(columns=['Post-operative admission to ICU','Multi-drug resistance','Anastomotic fistula','Mechanical ventilation time', 'Mechanical ventilation',
 #                        'Intraoperative blood transfusion','Infection status','Preoperative radiotherapy',
@@ -60,7 +61,7 @@ features = [
 X = data[features]
 y = data['PulmonaryInfection']
 
-min_ratio = 0.0172   # 保持正/负比约束
+min_ratio = 0.015   # 保持正/负比约束
 min_keep = 2430   # 至少保留样本数（你要求的）
 
 # ========== 分割数据 ==========

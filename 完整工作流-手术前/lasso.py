@@ -14,12 +14,12 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from tqdm.auto import tqdm
 
-DATA_PATH = Path("data1.csv")
+DATA_PATH = Path("data1sisclean.csv")
 TARGET_COLUMN = "PulmonaryInfection"
 TEST_SIZE = 0.3
 RANDOM_STATE = 42
-CORRELATION_THRESHOLD = 0.59
-OUTPUT_DIR = Path("analysis_outputs")
+CORRELATION_THRESHOLD = 0.6
+OUTPUT_DIR = Path("outputs/model_analysis")
 TRAIN_PATH = OUTPUT_DIR / "train_set.csv"
 TEST_PATH = OUTPUT_DIR / "test_set.csv"
 LASSO_COEF_PATH = OUTPUT_DIR / "lasso_coefficients.csv"

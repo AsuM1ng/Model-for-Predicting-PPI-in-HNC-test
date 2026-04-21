@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""按结局分组统计离散特征的样本数/比例，连续特征的均值/方差。"""
+"""按结局分组统计离散特征的样本数/比例，连续特征的均值±标准差（带 p 值）。"""
 
 from __future__ import annotations
 
@@ -10,13 +10,16 @@ from collections import Counter
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
 
+from scipy.stats import ttest_ind
+
 EPS = 1e-30
+OUTPUT_DIR = Path("outputs") / "data_clean"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "统计输入 CSV 中离散特征在两组结局下的样本数和比例，并统计连续特征的均值和方差。"
+            "统计输入 CSV 中离散特征在两组结局下的样本数和比例，并统计连续特征的均值±标准差（含 p 值）。"
         )
     )
     parser.add_argument(
@@ -26,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output",
-        default="feature_distribution_stats.csv",
+        default=str(OUTPUT_DIR / "feature_distribution_stats.csv"),
         help="输出 CSV 文件路径。",
     )
     parser.add_argument(
@@ -37,7 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--positive-values",
         default="1,有,yes,true",
-        help="判定为“肺部感染”组的取值（逗号分隔，忽略大小写）。",
+        help="判定为肺部感染组的取值（逗号分隔，忽略大小写）。",
     )
     parser.add_argument(
         "--positive-label",
@@ -53,7 +56,7 @@ def parse_args() -> argparse.Namespace:
         "--max-categories",
         type=int,
         default=20,
-        help="特征唯一值数量超过该阈值时自动跳过（默认 20）。",
+        help="特征唯一值数量超过该阈值时自动判定为连续变量（默认 20）。",
     )
     return parser.parse_args()
 
@@ -78,18 +81,58 @@ def parse_float(value: str) -> float | None:
         return None
 
 
-def mean_variance(values: List[float]) -> Tuple[float, float]:
+def mean_std(values: List[float]) -> Tuple[float, float]:
+    """返回 (均值, 标准差，ddof=1)。"""
     if not values:
         return 0.0, 0.0
     mean = sum(values) / len(values)
     if len(values) == 1:
         return mean, 0.0
-    variance = sum((x - mean) ** 2 for x in values) / (len(values) - 1)
-    return mean, variance
+    std = math.sqrt(sum((x - mean) ** 2 for x in values) / (len(values) - 1))
+    return mean, std
 
 
-def gammaincc(a: float, x: float) -> float:
-    """Regularized upper incomplete gamma Q(a, x)."""
+def welch_t_pvalue(a: List[float], b: List[float]) -> float:
+    """Welch t 检验双尾 p 值（调用 scipy）。"""
+    if len(a) < 2 or len(b) < 2:
+        return 1.0
+    _, p = ttest_ind(a, b, equal_var=False, nan_policy="omit")
+    if math.isnan(p):
+        return 1.0
+    return float(p)
+
+
+def chi_square_p_value(contingency: Sequence[Sequence[int]]) -> float:
+    rows = len(contingency)
+    cols = len(contingency[0]) if rows else 0
+    if rows < 2 or cols < 2:
+        return 1.0
+
+    row_totals = [sum(r) for r in contingency]
+    col_totals = [sum(contingency[r][c] for r in range(rows)) for c in range(cols)]
+    total = sum(row_totals)
+    if total == 0:
+        return 1.0
+
+    chi2 = 0.0
+    for r in range(rows):
+        for c in range(cols):
+            expected = row_totals[r] * col_totals[c] / total
+            if expected <= 0:
+                continue
+            diff = contingency[r][c] - expected
+            chi2 += (diff * diff) / expected
+
+    dof = (rows - 1) * (cols - 1)
+    if dof <= 0:
+        return 1.0
+
+    # chi-square survival function via regularized upper incomplete gamma Q(dof/2, chi2/2)
+    return _gammaincc(dof / 2.0, chi2 / 2.0)
+
+
+def _gammaincc(a: float, x: float) -> float:
+    """Regularized upper incomplete gamma Q(a, x)。"""
     if x < 0 or a <= 0:
         raise ValueError("invalid arguments for gammaincc")
     if x == 0:
@@ -133,35 +176,6 @@ def gammaincc(a: float, x: float) -> float:
     return max(0.0, min(1.0, q))
 
 
-def chi_square_p_value(contingency: Sequence[Sequence[int]]) -> float:
-    rows = len(contingency)
-    cols = len(contingency[0]) if rows else 0
-    if rows < 2 or cols < 2:
-        return 1.0
-
-    row_totals = [sum(r) for r in contingency]
-    col_totals = [sum(contingency[r][c] for r in range(rows)) for c in range(cols)]
-    total = sum(row_totals)
-    if total == 0:
-        return 1.0
-
-    chi2 = 0.0
-    for r in range(rows):
-        for c in range(cols):
-            expected = row_totals[r] * col_totals[c] / total
-            if expected <= 0:
-                continue
-            diff = contingency[r][c] - expected
-            chi2 += (diff * diff) / expected
-
-    dof = (rows - 1) * (cols - 1)
-    if dof <= 0:
-        return 1.0
-
-    # chi-square survival function
-    return gammaincc(dof / 2.0, chi2 / 2.0)
-
-
 def format_p_value(p: float) -> str:
     if p < 0.001:
         return "<0.001"
@@ -200,11 +214,13 @@ def choose_group_col(columns: Iterable[str], preferred: str) -> str:
 
 def build_table(args: argparse.Namespace) -> List[Dict[str, str]]:
     input_path = Path(args.input)
-    if not input_path.exists() and args.input == "data1sisclean.csv":
-        fallback = Path("data1.csv")
+    if not input_path.exists():
+        fallback = Path("data1sisclean.csv")
         if fallback.exists():
             input_path = fallback
-            print(f"[提示] 未找到 data1sisclean.csv，已自动使用 {fallback}。")
+            print(f"[提示] 未找到 {args.input}，已自动使用 {fallback}。")
+        else:
+            raise FileNotFoundError(f"未找到输入文件：{args.input}（也未找到 data1sisclean.csv 作为备选）")
 
     columns, rows = read_csv_rows(input_path)
     group_col = choose_group_col(columns, args.group_col)
@@ -227,23 +243,19 @@ def build_table(args: argparse.Namespace) -> List[Dict[str, str]]:
             continue
 
         values = []
-        numeric_values: List[float] = []
         is_numeric = True
         for row in rows:
             v = (row.get(feature) or "").strip()
             if v:
                 values.append(v)
-                parsed = parse_float(v)
-                if parsed is None:
+                if parse_float(v) is None:
                     is_numeric = False
-                else:
-                    numeric_values.append(parsed)
         uniq = sorted(set(values))
 
         if len(uniq) == 0:
             continue
 
-        # 连续变量：数值型且唯一值较多；离散变量按原逻辑处理不变。
+        # ---------- 连续变量：均值 ± 标准差（一行），附 p 值 ----------
         if is_numeric and len(uniq) > args.max_categories:
             pos_numeric = [
                 parsed
@@ -255,24 +267,20 @@ def build_table(args: argparse.Namespace) -> List[Dict[str, str]]:
                 for r in group_rows["neg"]
                 if (parsed := parse_float((r.get(feature) or "").strip())) is not None
             ]
-            pos_mean, pos_var = mean_variance(pos_numeric)
-            neg_mean, neg_var = mean_variance(neg_numeric)
+            pos_mean, pos_std = mean_std(pos_numeric)
+            neg_mean, neg_std = mean_std(neg_numeric)
+            p_val = welch_t_pvalue(pos_numeric, neg_numeric)
+
+            pos_label = f"{args.positive_label} N={pos_n}"
+            neg_label = f"{args.negative_label} N={neg_n}"
+
             out_rows.append(
                 {
                     "特征": feature,
-                    "分层": "均值",
-                    f"{args.positive_label} N={pos_n}": f"{pos_mean:.4f}",
-                    f"{args.negative_label} N={neg_n}": f"{neg_mean:.4f}",
-                    "P-value": "",
-                }
-            )
-            out_rows.append(
-                {
-                    "特征": "",
-                    "分层": "方差",
-                    f"{args.positive_label} N={pos_n}": f"{pos_var:.4f}",
-                    f"{args.negative_label} N={neg_n}": f"{neg_var:.4f}",
-                    "P-value": "",
+                    "分层": "均值 ± 标准差",
+                    pos_label: f"{pos_mean:.2f} ± {pos_std:.2f}",
+                    neg_label: f"{neg_mean:.2f} ± {neg_std:.2f}",
+                    "P-value": format_p_value(p_val),
                 }
             )
             continue
@@ -280,6 +288,7 @@ def build_table(args: argparse.Namespace) -> List[Dict[str, str]]:
         if len(uniq) > args.max_categories:
             continue
 
+        # ---------- 离散变量：样本数/比例 ----------
         pos_counter = Counter((r.get(feature) or "").strip() for r in group_rows["pos"])
         neg_counter = Counter((r.get(feature) or "").strip() for r in group_rows["neg"])
 
@@ -310,6 +319,7 @@ def write_csv(path: Path, rows: List[Dict[str, str]]) -> None:
     if not rows:
         raise ValueError("没有可写入的统计结果")
     fieldnames = list(rows[0].keys())
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()

@@ -1,7 +1,6 @@
-from __future__ import annotations
-
 """训练集内多因素Logistic分析，筛选独立预测因素。"""
 
+from __future__ import annotations
 import json
 from pathlib import Path
 
@@ -10,7 +9,7 @@ import pandas as pd
 import statsmodels.api as sm
 from tqdm.auto import tqdm
 
-OUTPUT_DIR = Path("analysis_outputs")
+OUTPUT_DIR = Path("outputs/model_analysis")
 TRAIN_PATH = OUTPUT_DIR / "train_set.csv"
 FILTERED_FEATURES_PATH = OUTPUT_DIR / "selected_features_after_correlation.json"
 LOGISTIC_RESULTS_PATH = OUTPUT_DIR / "multivariable_logistic_results.csv"
@@ -85,7 +84,7 @@ def fit_multivariable_logistic(X: pd.DataFrame, y: pd.Series) -> pd.DataFrame:
         beta = float(result.params[feature])
         lower = float(conf.loc[feature, 0])
         upper = float(conf.loc[feature, 1])
-        p_value = 0.5*float(result.pvalues[feature])
+        p_value = float(result.pvalues[feature])/2
         records.append({
             "feature": feature,
             "coefficient": beta,

@@ -1,0 +1,26 @@
+{
+  "target": "PulmonaryInfection",
+  "correlation_threshold": 0.6,
+  "final_features": [
+    "PreopHGB",
+    "AlcoholHistory",
+    "PreopConcurrentCRT",
+    "Diabetes",
+    "PreopChemotherapy",
+    "PreopALB",
+    "CoronaryHeartDisease",
+    "PeripheralVascularDisease",
+    "BMI",
+    "ASA",
+    "PreopRadiotherapy"
+  ],
+  "removed_pairs": [
+    {
+      "keep_feature": "AlcoholHistory",
+      "drop_feature": "SmokingHistory",
+      "spearman_abs": 0.6100167511578606,
+      "keep_abs_coefficient": 0.2775124791615335,
+      "drop_abs_coefficient": 0.13061843221382607
+    }
+  ]
+}
